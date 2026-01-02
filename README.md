@@ -40,6 +40,7 @@ If you prefer to clone manually:
 cd ~
 git clone https://github.com/JohnBaumb/KlipperFleet.git
 cd KlipperFleet
+sudo chmod +x install.sh
 sudo ./install.sh
 ```
 
