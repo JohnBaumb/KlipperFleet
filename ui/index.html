@@ -461,8 +461,10 @@
 
                 const saveProfile = async () => {
                     let name = selectedProfile.value;
+                    let base_profile = selectedProfile.value;
                     if (!name) {
                         name = prompt("Enter profile name:", "my_mcu");
+                        base_profile = null;
                     }
                     if (!name) return;
 
@@ -470,7 +472,7 @@
                     await fetch('/config/save', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ name, values })
+                        body: JSON.stringify({ name, values, base_profile })
                     });
                     
                     const isNew = !selectedProfile.value;
@@ -529,6 +531,11 @@
                 const startBuild = async (profileName = null) => {
                     const target = profileName || selectedProfile.value;
                     if (!target) return;
+                    
+                    // If we are building the currently selected profile and have unsaved changes, save them first
+                    if (!profileName && Object.keys(modifiedValues.value).length > 0) {
+                        await saveProfile();
+                    }
                     
                     building.value = true;
                     buildLogs.value += `>>> Starting build for ${target}...\n`;
