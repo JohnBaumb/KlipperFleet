@@ -231,10 +231,13 @@
                             </div>
                             
                             <div v-if="devices.serial.length > 0">
-                                <h4 class="text-xs font-bold text-gray-400 mb-2 uppercase tracking-wider">Serial Devices</h4>
+                                <h4 class="text-xs font-bold text-gray-400 mb-2 uppercase tracking-wider">Serial & UART Devices</h4>
                                 <div v-for="dev in devices.serial" :key="dev.id" class="flex items-center justify-between p-3 bg-gray-800 rounded mb-2">
                                     <div class="overflow-hidden">
-                                        <p class="text-sm font-bold truncate text-gray-100">{{ dev.name }}</p>
+                                        <div class="flex items-center space-x-2">
+                                            <p class="text-sm font-bold truncate text-gray-100">{{ dev.name }}</p>
+                                            <span v-if="dev.type === 'uart'" class="text-[8px] bg-orange-900 text-orange-200 px-1 rounded font-bold uppercase">UART</span>
+                                        </div>
                                         <p class="text-[10px] text-gray-400 font-mono truncate">{{ dev.id }}</p>
                                     </div>
                                     <button @click="addDeviceToFleet(dev, 'serial')" class="text-blue-400 hover:text-blue-300 text-sm">

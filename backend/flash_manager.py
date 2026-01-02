@@ -11,21 +11,38 @@ class FlashManager:
         self.katapult_dir = katapult_dir
 
     async def discover_serial_devices(self) -> List[Dict[str, str]]:
-        """Lists all serial devices in /dev/serial/by-id/."""
+        """Lists all serial devices in /dev/serial/by-id/ and common UART ports."""
         devices = []
-        path = "/dev/serial/by-id/*"
+        
+        # 1. USB Serial devices (by-id is preferred for stability)
+        usb_devs = glob.glob("/dev/serial/by-id/*")
+        
+        # 2. Common UART devices (often used for direct GPIO connection)
+        # We only include these if they exist AND are configured in Moonraker.
+        # This prevents showing the system console or other non-MCU UARTs.
+        uart_candidates = ["/dev/ttyAMA0", "/dev/ttyS0", "/dev/ttyUSB0"]
         
         moonraker_mcus = await self._get_moonraker_mcus()
         
-        for dev in glob.glob(path):
+        # Combine and deduplicate
+        all_devs = list(set(usb_devs + [d for d in uart_candidates if os.path.exists(d)]))
+        
+        for dev in all_devs:
             name = os.path.basename(dev)
-            if dev in moonraker_mcus:
-                name = moonraker_mcus[dev]
+            is_configured = dev in moonraker_mcus
+            dev_type = "serial"
             
-            devices.append({
-                "id": dev,
-                "name": name
-            })
+            # If it's a by-id device, it's almost certainly an MCU
+            if dev.startswith("/dev/serial/by-id/"):
+                if is_configured:
+                    name = f"{moonraker_mcus[dev]} ({name})"
+                devices.append({"id": dev, "name": name, "type": "usb"})
+            
+            # If it's a raw UART device, only show it if it's actually configured in Klipper
+            elif is_configured:
+                name = f"{moonraker_mcus[dev]} ({name})"
+                devices.append({"id": dev, "name": name, "type": "uart"})
+                
         return devices
 
     async def _get_moonraker_mcus(self) -> Dict[str, str]:
