@@ -19,10 +19,16 @@ class KconfigManager:
         if not os.path.exists(self.kconfig_file):
             raise FileNotFoundError(f"Kconfig file not found at {self.kconfig_file}")
 
-        # kconfiglib.Kconfig will use the environment variables to resolve 'source' paths
-        self.kconf = kconfiglib.Kconfig(self.kconfig_file, warn=False)
-        if config_file and os.path.exists(config_path := os.path.expanduser(config_file)):
-            self.kconf.load_config(config_path)
+        # Save current CWD and switch to klipper_dir so relative 'source' paths resolve
+        old_cwd = os.getcwd()
+        os.chdir(abs_klipper_dir)
+        try:
+            # kconfiglib.Kconfig will use the environment variables to resolve 'source' paths
+            self.kconf = kconfiglib.Kconfig(self.kconfig_file, warn=False)
+            if config_file and os.path.exists(config_path := os.path.expanduser(config_file)):
+                self.kconf.load_config(config_path)
+        finally:
+            os.chdir(old_cwd)
 
     def get_menu_tree(self) -> List[Dict[str, Any]]:
         """Returns a JSON-serializable tree of the Kconfig menu."""
