@@ -299,7 +299,7 @@
                                         <input type="checkbox" v-model="dev.is_katapult" @change="updateFleetDevice(dev)" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500">
                                         <span class="text-[10px] text-gray-400 group-hover:text-gray-200 uppercase font-bold">Katapult</span>
                                     </label>
-                                    <label v-if="dev.method !== 'can'" class="flex items-center space-x-2 cursor-pointer group">
+                                    <label class="flex items-center space-x-2 cursor-pointer group">
                                         <input type="checkbox" v-model="dev.is_bridge" @change="updateFleetDevice(dev)" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500">
                                         <span class="text-[10px] text-gray-400 group-hover:text-gray-200 uppercase font-bold">CAN Bridge</span>
                                     </label>
