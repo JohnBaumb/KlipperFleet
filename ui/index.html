@@ -1,0 +1,756 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KlipperFleet</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        body { background-color: #121212; color: #f0f0f0; }
+        .kconfig-item { margin-left: 1.5rem; }
+        .kconfig-menu { border-left: 1px solid #333; padding-left: 1rem; }
+        .mainsail-card { background-color: #1e1e1e; border: 1px solid #333; }
+        .mainsail-btn { background-color: #3b82f6; transition: background-color 0.2s; }
+        .mainsail-btn:hover { background-color: #2563eb; }
+        .mainsail-input { background-color: #0f0f0f; border: 1px solid #444; color: #f0f0f0; }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #121212; }
+        ::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #444; }
+    </style>
+</head>
+<body class="font-sans">
+    <div id="app" class="flex h-screen overflow-hidden">
+        <!-- Sidebar -->
+        <aside class="w-64 mainsail-card border-r border-gray-800 flex flex-col">
+            <div class="p-6 border-b border-gray-800">
+                <h1 class="text-2xl font-bold text-blue-500"><i class="fas fa-ship mr-2"></i>KlipperFleet</h1>
+            </div>
+            <nav class="flex-1 p-4 space-y-2">
+                <button @click="view = 'dashboard'" :class="view === 'dashboard' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-800 hover:text-white'" class="w-full text-left p-3 rounded flex items-center transition-colors">
+                    <i class="fas fa-tachometer-alt mr-3"></i> Dashboard
+                </button>
+                <button @click="view = 'configurator'" :class="view === 'configurator' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-800 hover:text-white'" class="w-full text-left p-3 rounded flex items-center transition-colors">
+                    <i class="fas fa-cog mr-3"></i> Configurator
+                </button>
+                <button @click="view = 'fleet'" :class="view === 'fleet' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-800 hover:text-white'" class="w-full text-left p-3 rounded flex items-center transition-colors">
+                    <i class="fas fa-microchip mr-3"></i> Fleet Manager
+                </button>
+            </nav>
+            <div class="p-4 border-t border-gray-800 space-y-2">
+                <button @click="selfUpdate" :disabled="updating" class="w-full text-left p-2 rounded flex items-center text-xs text-gray-300 hover:bg-gray-800 hover:text-white transition-colors">
+                    <i class="fas fa-sync-alt mr-2" :class="updating ? 'fa-spin' : ''"></i> 
+                    {{ updating ? 'Updating...' : 'Update KlipperFleet' }}
+                </button>
+                <div class="text-[10px] text-gray-500">v1.0.5-alpha</div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="flex-1 flex flex-col overflow-hidden">
+            <!-- Header -->
+            <header class="h-16 mainsail-card border-b border-gray-800 flex items-center justify-between px-8">
+                <div class="flex items-center space-x-4">
+                    <a :href="mainsailUrl" class="text-gray-400 hover:text-white flex items-center text-sm transition-colors mr-4 border-r border-gray-800 pr-4">
+                        <i class="fas fa-arrow-left mr-2"></i> Return to Mainsail
+                    </a>
+                    <h2 class="text-xl font-semibold capitalize">{{ view }}</h2>
+                </div>
+                <div class="flex items-center space-x-4">
+                    <span v-if="building || flashing" class="flex items-center text-orange-400 text-sm">
+                        <i class="fas fa-circle-notch fa-spin mr-2"></i> Processing...
+                    </span>
+                    <div v-if="view === 'dashboard'" class="flex items-center space-x-2">
+                        <button @click="runBatch('build-all')" :disabled="building || flashing" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-[10px] font-bold disabled:opacity-50 uppercase">
+                            Build All
+                        </button>
+                        <button @click="runBatch('build-flash-ready')" :disabled="building || flashing" class="bg-orange-600 hover:bg-orange-700 text-white px-3 py-1 rounded text-[10px] font-bold disabled:opacity-50 uppercase">
+                            Build & Flash Ready
+                        </button>
+                        <button @click="runBatch('build-flash-all')" :disabled="building || flashing" class="bg-red-700 hover:bg-red-800 text-white px-3 py-1 rounded text-[10px] font-bold disabled:opacity-50 uppercase">
+                            Build & Flash All
+                        </button>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Content Area -->
+            <div class="flex-1 flex flex-col min-h-0 p-8">
+                
+                <!-- Alpha Warning -->
+                <div class="mb-6 bg-orange-900/20 border border-orange-500/30 rounded-lg p-4 flex items-center space-x-4 text-orange-200">
+                    <i class="fas fa-vial text-xl"></i>
+                    <div class="text-xs">
+                        <p class="font-bold uppercase tracking-wider mb-1">Alpha Version</p>
+                        <p class="opacity-80">Tested primarily on CAN and Linux devices. Bug reports and contributions are welcome!</p>
+                    </div>
+                </div>
+
+                <!-- Dashboard View -->
+                <div v-if="view === 'dashboard'" class="flex-1 flex flex-col min-h-0 space-y-6">
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 flex-none overflow-y-auto max-h-[60vh] pr-2">
+                        <div v-for="dev in fleet" :key="dev.id" class="mainsail-card rounded-lg p-6">
+                            <div class="flex justify-between items-start mb-4">
+                                <div>
+                                    <h3 class="text-lg font-bold text-white">{{ dev.name }}</h3>
+                                    <div class="flex items-center space-x-2">
+                                        <span class="flex items-center text-[10px] uppercase font-bold" :class="statusColor(dev.status)">
+                                            <i class="fas fa-circle text-[6px] mr-1"></i> {{ formatStatus(dev.status) }}
+                                        </span>
+                                        <button v-if="dev.method === 'can'" 
+                                                @click="rebootDevice(dev.id, dev.status === 'ready' ? 'regular' : 'katapult')" 
+                                                :disabled="flashing"
+                                                class="transition-colors"
+                                                :class="dev.status === 'ready' ? 'text-blue-400 hover:text-blue-300' : 'text-gray-500 hover:text-blue-400'"
+                                                :title="dev.status === 'ready' ? 'Return to Service (running klipper)' : 'Reboot to Katapult/Canboot'">
+                                            <i class="fas fa-power-off text-[8px]"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                                <span class="px-2 py-1 rounded text-[10px] font-bold uppercase" :class="dev.method === 'can' ? 'bg-purple-900 text-purple-100' : 'bg-blue-900 text-blue-100'">
+                                    {{ dev.method }}
+                                </span>
+                            </div>
+                            <div class="space-y-3">
+                                <div class="flex justify-between text-sm">
+                                    <span class="text-gray-300">Profile:</span>
+                                    <span class="font-medium text-blue-400">{{ dev.profile || 'None' }}</span>
+                                </div>
+                                <div v-if="dev.notes" class="text-[10px] text-gray-200 bg-black/40 p-2 rounded italic whitespace-pre-wrap break-words border border-gray-800" v-html="formatNotes(dev.notes)">
+                                </div>
+                                <div class="space-y-2">
+                                    <div class="flex space-x-2">
+                                        <button @click="quickBuild(dev)" :disabled="building || flashing" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-1.5 rounded text-[10px] font-bold disabled:opacity-50 uppercase">
+                                            Build
+                                        </button>
+                                        <button @click="quickFlashOnly(dev)" :disabled="building || flashing" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-1.5 rounded text-[10px] font-bold disabled:opacity-50 uppercase">
+                                            Flash
+                                        </button>
+                                    </div>
+                                    <div class="flex space-x-2">
+                                        <button @click="quickFlash(dev)" :disabled="building || flashing" class="flex-1 mainsail-btn text-white py-2 rounded text-sm font-bold disabled:opacity-50">
+                                            Build & Flash
+                                        </button>
+                                        <button v-if="dev.profile" @click="buildAndDownload(dev.profile)" :disabled="building || flashing" class="bg-gray-700 hover:bg-gray-600 text-white p-2 rounded flex items-center justify-center" title="Build & Download Binary">
+                                            <i class="fas fa-download"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Build Logs (Always visible on dashboard) -->
+                    <div class="mainsail-card rounded-lg overflow-hidden flex-1 flex flex-col min-h-[200px]">
+                        <div class="bg-gray-800 px-4 py-2 text-xs font-bold flex justify-between items-center">
+                            <span>BUILD & FLASH LOGS</span>
+                            <button @click="buildLogs = []" class="text-gray-500 hover:text-white">Clear</button>
+                        </div>
+                        <div class="p-4 font-mono text-xs text-green-400 flex-1 overflow-y-auto bg-black whitespace-pre-wrap" id="log-container">
+                            {{ buildLogs }}
+                            <div v-if="building || flashing" class="inline-block animate-pulse">_</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Configurator View -->
+                <div v-if="view === 'configurator'" class="flex-1 overflow-y-auto grid grid-cols-1 lg:grid-cols-4 gap-8 pr-2">
+                    <div class="lg:col-span-3 mainsail-card rounded-lg p-6">
+                        <div class="flex justify-between items-center mb-6">
+                            <div class="flex items-center space-x-2">
+                                <button @click="newProfile" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded text-sm font-bold flex items-center transition-colors" title="Start New Profile">
+                                    <i class="fas fa-file-alt mr-2"></i> New
+                                </button>
+                                <div class="h-8 w-px bg-gray-800 mx-2"></div>
+                                <select v-model="selectedProfile" @change="loadProfile" class="mainsail-input p-2 rounded text-sm w-48">
+                                    <option value="" disabled>-- Select Profile --</option>
+                                    <option v-for="p in profiles" :key="p" :value="p">{{ p }}</option>
+                                </select>
+                                <button @click="saveProfile" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded text-sm font-bold flex items-center transition-colors">
+                                    <i class="fas fa-save mr-2"></i> Save
+                                </button>
+                                <button v-if="selectedProfile" @click="saveProfileAs" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded text-sm font-bold transition-colors" title="Save As...">
+                                    <i class="fas fa-copy"></i>
+                                </button>
+                                <button v-if="selectedProfile" @click="deleteProfile" class="bg-red-900/50 hover:bg-red-700 text-red-200 px-3 py-2 rounded text-sm font-bold transition-colors" title="Delete Profile">
+                                    <i class="fas fa-trash"></i>
+                                </button>
+                            </div>
+                            <button v-if="selectedProfile" @click="startBuild()" :disabled="building" class="mainsail-btn text-white px-4 py-2 rounded text-sm font-bold disabled:opacity-50">
+                                <i class="fas fa-hammer mr-2"></i> Build
+                            </button>
+                        </div>
+
+                        <div v-if="loading" class="text-center py-20">
+                            <i class="fas fa-circle-notch fa-spin text-4xl text-blue-500 mb-4"></i>
+                            <p class="text-gray-500">Parsing Kconfig source...</p>
+                        </div>
+                        <div v-else-if="error" class="text-center py-20 text-red-400">
+                            <i class="fas fa-exclamation-triangle text-4xl mb-4"></i>
+                            <p class="font-bold">Error Loading Configurator</p>
+                            <p class="text-sm opacity-75">{{ error }}</p>
+                            <div class="flex justify-center space-x-4 mt-4">
+                                <button @click="fetchTree()" class="text-blue-400 hover:underline">Try Again</button>
+                                <button v-if="error.includes('not found')" @click="createMissingProfile" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded text-sm font-bold">
+                                    Create Profile
+                                </button>
+                            </div>
+                        </div>
+                        <div v-else class="space-y-2">
+                            <div v-for="item in configTree" :key="item.name || item.prompt">
+                                <kconfig-node :node="item" @update="updateValue"></kconfig-node>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="space-y-6">
+                        <div class="mainsail-card rounded-lg p-4">
+                            <h3 class="font-bold mb-4 text-sm border-b border-gray-800 pb-2">PROFILE INFO</h3>
+                            <div class="space-y-2 text-xs">
+                                <div class="flex justify-between"><span class="text-gray-500">Name:</span> <span>{{ selectedProfile || 'Unsaved' }}</span></div>
+                                <div class="flex justify-between"><span class="text-gray-500">Modified:</span> <span>{{ Object.keys(modifiedValues).length }} options</span></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Fleet Manager View -->
+                <div v-if="view === 'fleet'" class="flex-1 overflow-y-auto grid grid-cols-1 lg:grid-cols-2 gap-8 pr-2">
+                    <div class="mainsail-card rounded-lg p-6">
+                        <div class="flex justify-between items-center mb-6">
+                            <h3 class="text-lg font-bold text-white">Discovered Hardware</h3>
+                            <button @click="discoverDevices" class="text-gray-400 hover:text-white" title="Scan for Hardware">
+                                <i class="fas fa-sync-alt"></i>
+                            </button>
+                        </div>
+                        <div class="space-y-4">
+                            <div v-if="devices.serial.length === 0 && devices.can.length === 0 && (!devices.linux || devices.linux.length === 0)" class="text-center py-10 text-gray-400">
+                                <p>No devices found. Click scan to search.</p>
+                            </div>
+                            
+                            <div v-if="devices.serial.length > 0">
+                                <h4 class="text-xs font-bold text-gray-400 mb-2 uppercase tracking-wider">Serial Devices</h4>
+                                <div v-for="dev in devices.serial" :key="dev.id" class="flex items-center justify-between p-3 bg-gray-800 rounded mb-2">
+                                    <div class="overflow-hidden">
+                                        <p class="text-sm font-bold truncate text-gray-100">{{ dev.name }}</p>
+                                        <p class="text-[10px] text-gray-400 font-mono truncate">{{ dev.id }}</p>
+                                    </div>
+                                    <button @click="addDeviceToFleet(dev, 'serial')" class="text-blue-400 hover:text-blue-300 text-sm">
+                                        <i class="fas fa-plus-circle"></i>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div v-if="devices.can.length > 0">
+                                <h4 class="text-xs font-bold text-gray-400 mb-2 uppercase tracking-wider">CAN Devices</h4>
+                                <div v-for="dev in devices.can" :key="dev.id" class="flex items-center justify-between p-3 bg-gray-800 rounded mb-2">
+                                    <div>
+                                        <p class="text-sm font-bold text-gray-100">{{ dev.name }}</p>
+                                        <p class="text-[10px] text-gray-400 font-mono">{{ dev.id }}</p>
+                                    </div>
+                                    <button @click="addDeviceToFleet(dev, 'can')" class="text-blue-400 hover:text-blue-300 text-sm">
+                                        <i class="fas fa-plus-circle"></i>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div v-if="devices.linux && devices.linux.length > 0">
+                                <h4 class="text-xs font-bold text-gray-400 mb-2 uppercase tracking-wider">Linux Process</h4>
+                                <div v-for="dev in devices.linux" :key="dev.id" class="flex items-center justify-between p-3 bg-gray-800 rounded mb-2">
+                                    <div>
+                                        <p class="text-sm font-bold text-gray-100">{{ dev.name }}</p>
+                                        <p class="text-[10px] text-gray-400 font-mono">{{ dev.id }}</p>
+                                    </div>
+                                    <button @click="addDeviceToFleet(dev, 'linux')" class="text-blue-400 hover:text-blue-300 text-sm">
+                                        <i class="fas fa-plus-circle"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mainsail-card rounded-lg p-6">
+                        <h3 class="text-lg font-bold mb-6 text-white">Registered Fleet</h3>
+                        <div class="space-y-4">
+                            <div v-for="dev in fleet" :key="dev.id" class="p-4 bg-gray-800 rounded border-l-4" :class="{'border-purple-500': dev.method === 'can', 'border-blue-500': dev.method === 'serial', 'border-green-500': dev.method === 'linux'}">
+                                <div class="flex justify-between items-start">
+                                    <div>
+                                        <input v-model="dev.name" @change="updateFleetDevice(dev)" class="bg-transparent font-bold text-sm focus:outline-none border-b border-transparent focus:border-gray-600 text-white">
+                                        <p class="text-[10px] text-gray-400 font-mono">{{ dev.id }}</p>
+                                    </div>
+                                    <button @click="removeDeviceFromFleet(dev.id)" class="text-red-500 hover:text-red-400 text-xs">
+                                        <i class="fas fa-trash"></i>
+                                    </button>
+                                </div>
+                                <div class="mt-4 flex items-center space-x-4">
+                                    <select v-model="dev.profile" @change="updateFleetDevice(dev)" class="mainsail-input text-xs p-1 rounded flex-1">
+                                        <option value="">-- Assign Profile --</option>
+                                        <option v-for="p in profiles" :key="p" :value="p">{{ p }}</option>
+                                    </select>
+                                    <span class="text-[10px] font-bold uppercase text-gray-400">{{ dev.method }}</span>
+                                </div>
+                                <div class="mt-3">
+                                    <textarea v-model="dev.notes" @change="updateFleetDevice(dev)" 
+                                              placeholder="Notes (URLs, pinouts, etc...)"
+                                              class="w-full mainsail-input text-[10px] p-2 rounded h-16 resize-none focus:outline-none focus:border-blue-500 text-gray-200"
+                                    ></textarea>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </main>
+    </div>
+
+    <script>
+        const { createApp, ref, onMounted, watch } = Vue;
+
+        const KconfigNode = {
+            name: 'kconfig-node',
+            props: ['node'],
+            template: `
+                <div v-if="node.visible" class="mb-1 kconfig-item">
+                    <div class="flex items-center justify-between p-2 hover:bg-gray-800/80 bg-gray-900/20 rounded border border-gray-800/50 group transition-colors">
+                        <div class="flex items-center space-x-3 flex-1">
+                            <!-- Boolean -->
+                            <input v-if="node.type === 'bool'" type="checkbox" 
+                                   :checked="node.value === 'y'" 
+                                   :disabled="node.readonly"
+                                   @change="$emit('update', node.name, $event.target.checked ? 'y' : 'n')"
+                                   class="h-4 w-4 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500 disabled:opacity-50">
+                            
+                            <div class="flex flex-col">
+                                <span class="text-sm" :class="[node.type === 'menu' ? 'font-bold text-blue-400' : 'text-gray-100', node.readonly ? 'opacity-50' : '']">
+                                    {{ node.prompt }}
+                                </span>
+                                <span v-if="node.name" class="text-[9px] text-gray-400 font-mono">{{ node.name }}</span>
+                            </div>
+                        </div>
+
+                        <div class="flex items-center space-x-4">
+                            <!-- Choice -->
+                            <select v-if="node.type === 'choice'" 
+                                    :value="node.value"
+                                    :disabled="node.readonly"
+                                    @change="$emit('update', node.name, $event.target.value)"
+                                    class="mainsail-input rounded px-2 py-1 text-xs bg-gray-900 border-gray-700 min-w-[180px] disabled:opacity-50">
+                                <option v-for="c in node.choices" :key="c.name" :value="c.name">{{ c.prompt }}</option>
+                            </select>
+
+                            <!-- String / Hex / Int -->
+                            <input v-if="['string', 'hex', 'int'].includes(node.type)" 
+                                   type="text" :value="node.value"
+                                   :disabled="node.readonly"
+                                   @input="$emit('update', node.name, $event.target.value)"
+                                   class="mainsail-input rounded px-2 py-1 text-xs w-48 bg-gray-900 border-gray-700 disabled:opacity-50">
+                        </div>
+                    </div>
+                    
+                    <p v-if="node.help" class="text-[10px] text-gray-300 mt-1 ml-8 max-w-2xl leading-relaxed italic opacity-90">{{ node.help }}</p>
+
+                    <!-- Only show children if NOT a choice (to avoid redundant checkboxes) -->
+                    <div v-if="node.children && node.type !== 'choice'" class="kconfig-menu mt-1 ml-4 border-l border-gray-800 pl-2">
+                        <kconfig-node v-for="child in node.children" :key="child.name || child.prompt" :node="child" @update="(n, v) => $emit('update', n, v)"></kconfig-node>
+                    </div>
+                </div>
+            `
+        };
+
+        createApp({
+            components: { KconfigNode },
+            setup() {
+                const view = ref(localStorage.getItem('kf_view') || 'dashboard');
+                const configTree = ref([]);
+                const profiles = ref([]);
+                const fleet = ref([]);
+                const devices = ref({ serial: [], can: [], linux: [] });
+                const selectedProfile = ref(localStorage.getItem('kf_profile') || '');
+                const loading = ref(false);
+                const building = ref(false);
+                const flashing = ref(false);
+                const updating = ref(false);
+                const buildLogs = ref("");
+                const modifiedValues = ref(JSON.parse(localStorage.getItem('kf_modified') || '{}'));
+                const selectedDevice = ref({ id: '', method: '' });
+                const error = ref(null);
+                const mainsailUrl = window.location.protocol + '//' + window.location.hostname;
+
+                watch(view, (v) => localStorage.setItem('kf_view', v));
+                watch(selectedProfile, (p) => localStorage.setItem('kf_profile', p));
+                watch(modifiedValues, (m) => localStorage.setItem('kf_modified', JSON.stringify(m)), { deep: true });
+
+                const fetchTree = async (profile = '') => {
+                    loading.value = true;
+                    error.value = null;
+                    try {
+                        const values = Object.entries(modifiedValues.value).map(([name, value]) => ({ name, value }));
+                        const res = await fetch('/config/tree', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ profile: profile || selectedProfile.value, values })
+                        });
+                        if (!res.ok) {
+                            const data = await res.json();
+                            throw new Error(data.detail || 'Failed to load Kconfig');
+                        }
+                        configTree.value = await res.json();
+                    } catch (e) {
+                        console.error(e);
+                        error.value = e.message;
+                    } finally {
+                        loading.value = false;
+                    }
+                };
+
+                const fetchProfiles = async () => {
+                    const res = await fetch('/profiles');
+                    const data = await res.json();
+                    profiles.value = data.profiles;
+                };
+
+                const fetchFleet = async () => {
+                    const res = await fetch('/fleet');
+                    fleet.value = await res.json();
+                };
+
+                const discoverDevices = async () => {
+                    const res = await fetch('/devices/discover');
+                    devices.value = await res.json();
+                };
+
+                let updateTimeout = null;
+                const updateValue = (name, value) => {
+                    modifiedValues.value[name] = value;
+                    
+                    // Local update for immediate feedback
+                    const updateNode = (nodes) => {
+                        for (const node of nodes) {
+                            if (node.name === name) {
+                                node.value = value;
+                                return true;
+                            }
+                            if (node.children && updateNode(node.children)) return true;
+                        }
+                        return false;
+                    };
+                    updateNode(configTree.value);
+
+                    // Debounced refresh for visibility/dependencies
+                    clearTimeout(updateTimeout);
+                    updateTimeout = setTimeout(() => {
+                        fetchTree(selectedProfile.value);
+                    }, 500);
+                };
+
+                const saveProfile = async () => {
+                    let name = selectedProfile.value;
+                    if (!name) {
+                        name = prompt("Enter profile name:", "my_mcu");
+                    }
+                    if (!name) return;
+
+                    const values = Object.entries(modifiedValues.value).map(([name, value]) => ({ name, value }));
+                    await fetch('/config/save', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name, values })
+                    });
+                    
+                    const isNew = !selectedProfile.value;
+                    modifiedValues.value = {};
+                    await fetchProfiles();
+                    selectedProfile.value = name;
+                    loadProfile();
+                    
+                    if (isNew) {
+                        alert(`Profile "${name}" created successfully.`);
+                    }
+                };
+
+                const saveProfileAs = async () => {
+                    if (!selectedProfile.value) return;
+                    const name = prompt("Enter new profile name:", `${selectedProfile.value}_copy`);
+                    if (!name || name === selectedProfile.value) return;
+
+                    const values = Object.entries(modifiedValues.value).map(([name, value]) => ({ name, value }));
+                    await fetch('/config/save', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ 
+                            name, 
+                            values,
+                            base_profile: selectedProfile.value 
+                        })
+                    });
+                    
+                    modifiedValues.value = {};
+                    await fetchProfiles();
+                    selectedProfile.value = name;
+                    loadProfile();
+                };
+
+                const newProfile = () => {
+                    if (Object.keys(modifiedValues.value).length > 0) {
+                        if (!confirm("Discard unsaved changes and start a new profile?")) return;
+                    }
+                    selectedProfile.value = '';
+                    modifiedValues.value = {};
+                    fetchTree();
+                };
+
+                const deleteProfile = async () => {
+                    if (!selectedProfile.value) return;
+                    if (!confirm(`Are you sure you want to delete the profile "${selectedProfile.value}"?`)) return;
+
+                    await fetch(`/profiles/${selectedProfile.value}`, { method: 'DELETE' });
+                    selectedProfile.value = '';
+                    modifiedValues.value = {};
+                    fetchProfiles();
+                    fetchTree();
+                };
+
+                const startBuild = async (profileName = null) => {
+                    const target = profileName || selectedProfile.value;
+                    if (!target) return;
+                    
+                    building.value = true;
+                    buildLogs.value += `>>> Starting build for ${target}...\n`;
+                    
+                    const response = await fetch(`/build/${target}`);
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        const chunk = decoder.decode(value, { stream: true });
+                        buildLogs.value += chunk;
+                        scrollToBottom();
+                    }
+                    building.value = false;
+                };
+
+                const runBatch = async (action) => {
+                    building.value = true;
+                    buildLogs.value += `>>> Starting batch operation: ${action}...\n`;
+                    
+                    const response = await fetch(`/batch/${action}`);
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        const chunk = decoder.decode(value, { stream: true });
+                        buildLogs.value += chunk;
+                        scrollToBottom();
+                    }
+                    building.value = false;
+                    fetchFleet();
+                };
+
+                const startFlash = async (profile, deviceId, method) => {
+                    flashing.value = true;
+                    buildLogs.value += `>>> Flashing ${profile} to ${deviceId}...\n`;
+                    
+                    const response = await fetch('/flash', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ profile, device_id: deviceId, method })
+                    });
+
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        const chunk = decoder.decode(value, { stream: true });
+                        buildLogs.value += chunk;
+                        scrollToBottom();
+                    }
+                    flashing.value = false;
+                };
+
+                const quickFlash = async (dev) => {
+                    if (!dev.profile) {
+                        alert("Please assign a profile to this device first.");
+                        return;
+                    }
+                    view.value = 'dashboard';
+                    await startBuild(dev.profile);
+                    await startFlash(dev.profile, dev.id, dev.method);
+                };
+
+                const quickBuild = async (dev) => {
+                    if (!dev.profile) {
+                        alert("Please assign a profile to this device first.");
+                        return;
+                    }
+                    view.value = 'dashboard';
+                    await startBuild(dev.profile);
+                };
+
+                const quickFlashOnly = async (dev) => {
+                    if (!dev.profile) {
+                        alert("Please assign a profile to this device first.");
+                        return;
+                    }
+                    view.value = 'dashboard';
+                    await startFlash(dev.profile, dev.id, dev.method);
+                };
+
+                const buildAndDownload = async (profile) => {
+                    view.value = 'dashboard';
+                    await startBuild(profile);
+                    window.location.href = '/download/' + profile;
+                };
+
+                const rebootDevice = async (deviceId, mode = 'katapult') => {
+                    flashing.value = true;
+                    const modeText = mode === 'katapult' ? 'Katapult' : 'Regular';
+                    buildLogs.value += `>>> Requesting ${modeText} reboot for ${deviceId}...\n`;
+                    
+                    const response = await fetch(`/flash/reboot?device_id=${encodeURIComponent(deviceId)}&mode=${mode}`, {
+                        method: 'POST'
+                    });
+
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        const chunk = decoder.decode(value, { stream: true });
+                        buildLogs.value += chunk;
+                        scrollToBottom();
+                    }
+                    flashing.value = false;
+                    setTimeout(fetchFleet, 2000);
+                };
+
+                const statusColor = (status) => {
+                    if (status === 'ready') return 'text-green-500';
+                    if (status === 'service') return 'text-blue-500';
+                    return 'text-red-500';
+                };
+
+                const formatStatus = (status) => {
+                    if (status === 'ready') return 'Ready';
+                    if (status === 'service') return 'In Service';
+                    return status || 'offline';
+                };
+
+                const addDeviceToFleet = async (dev, method) => {
+                    const name = prompt("Enter a friendly name for this device:", dev.name);
+                    if (!name) return;
+                    
+                    const newDevice = { name, id: dev.id, profile: '', method, notes: '' };
+                    await fetch('/fleet/device', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(newDevice)
+                    });
+                    fetchFleet();
+                };
+
+                const updateFleetDevice = async (dev) => {
+                    await fetch('/fleet/device', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(dev)
+                    });
+                };
+
+                const removeDeviceFromFleet = async (id) => {
+                    if (!confirm("Remove this device from your fleet?")) return;
+                    await fetch(`/fleet/device/${id}`, { method: 'DELETE' });
+                    fetchFleet();
+                };
+
+                const selfUpdate = async () => {
+                    if (!confirm("This will pull the latest changes and restart the service. Continue?")) return;
+                    updating.value = true;
+                    try {
+                        const res = await fetch('/api/self-update', { method: 'POST' });
+                        const data = await res.json();
+                        alert(data.message);
+                        // Wait a bit then reload
+                        setTimeout(() => {
+                            window.location.reload();
+                        }, 5000);
+                    } catch (e) {
+                        alert("Update failed: " + e.message);
+                        updating.value = false;
+                    }
+                };
+
+                const loadProfile = () => {
+                    modifiedValues.value = {};
+                    fetchTree(selectedProfile.value);
+                };
+
+                const createMissingProfile = async () => {
+                    const name = selectedProfile.value;
+                    if (!name) return;
+                    
+                    loading.value = true;
+                    try {
+                        await fetch('/config/save', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ name, values: [] })
+                        });
+                        await fetchProfiles();
+                        loadProfile();
+                    } catch (e) {
+                        error.value = "Failed to create profile: " + e.message;
+                    } finally {
+                        loading.value = false;
+                    }
+                };
+
+                const scrollToBottom = () => {
+                    setTimeout(() => {
+                        const container = document.getElementById('log-container');
+                        if (container) container.scrollTop = container.scrollHeight;
+                    }, 10);
+                };
+
+                onMounted(() => {
+                    fetchTree(selectedProfile.value);
+                    fetchProfiles();
+                    fetchFleet();
+                    discoverDevices();
+                    
+                    // Refresh fleet status every 30 seconds
+                    setInterval(() => {
+                        fetchFleet();
+                    }, 30000);
+                });
+
+                const formatNotes = (text) => {
+                    if (!text) return '';
+                    const urlRegex = /(https?:\/\/[^\s]+)/g;
+                    return text.replace(urlRegex, (url) => {
+                        return `<a href="${url}" target="_blank" class="text-blue-400 hover:underline">${url}</a>`;
+                    });
+                };
+
+                return { 
+                    view, configTree, profiles, fleet, selectedProfile, loading, building, flashing, updating,
+                    buildLogs, updateValue, saveProfile, saveProfileAs, newProfile, deleteProfile, loadProfile, createMissingProfile, startBuild, runBatch, selfUpdate,
+                    devices, selectedDevice, discoverDevices, startFlash, quickFlash, quickBuild, quickFlashOnly, buildAndDownload, rebootDevice, statusColor, formatStatus,
+                    addDeviceToFleet, updateFleetDevice, removeDeviceFromFleet, error, modifiedValues, formatNotes,
+                    mainsailUrl
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
+
