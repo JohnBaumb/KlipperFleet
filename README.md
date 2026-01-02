@@ -1,7 +1,11 @@
 # KlipperFleet
 
 > [!WARNING]
-> **ALPHA SOFTWARE**: KlipperFleet is currently in alpha. It has only been extensively tested on **CAN bus** and **Linux Process** devices. Use with caution on Serial/USB devices. Contributions and bug reports are highly appreciated!
+> **ALPHA SOFTWARE**: KlipperFleet is currently in alpha. It has only been extensively tested on **CAN bus** and **Linux Process** devices. 
+>
+> **Katapult USB flashing and standard USB flashing are currently untested.** However, the build system is fully functional, so you can still use KlipperFleet to compile your firmware and download the binaries for manual flashing.
+>
+> Contributions and bug reports are highly appreciated!
 
 KlipperFleet is a "one-stop-shop" for managing Klipper firmware across your entire fleet of MCUs on a single printer. It provides a modern web interface (integrated into Mainsail) to configure, build, and flash firmware without ever touching the command line.
 
