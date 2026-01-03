@@ -66,6 +66,9 @@
                         <button @click="runBatch('build-all')" :disabled="building || flashing" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-[10px] font-bold disabled:opacity-50 uppercase">
                             Build All
                         </button>
+                        <button @click="runBatch('flash-all')" :disabled="building || flashing" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-[10px] font-bold disabled:opacity-50 uppercase">
+                            Flash All
+                        </button>
                         <button @click="runBatch('build-flash-ready')" :disabled="building || flashing" class="bg-orange-600 hover:bg-orange-700 text-white px-3 py-1 rounded text-[10px] font-bold disabled:opacity-50 uppercase">
                             Build & Flash Ready
                         </button>
@@ -558,19 +561,32 @@
                     building.value = true;
                     buildLogs.value += `>>> Starting batch operation: ${action}...\n`;
                     
-                    const response = await fetch(`/batch/${action}`);
-                    const reader = response.body.getReader();
-                    const decoder = new TextDecoder();
-
-                    while (true) {
-                        const { value, done } = await reader.read();
-                        if (done) break;
-                        const chunk = decoder.decode(value, { stream: true });
-                        buildLogs.value += chunk;
-                        scrollToBottom();
+                    try {
+                        const res = await fetch(`/batch/${action}`);
+                        const { task_id } = await res.json();
+                        
+                        let lastLogIndex = 0;
+                        while (true) {
+                            const statusRes = await fetch(`/batch/status/${task_id}`);
+                            const task = await statusRes.json();
+                            
+                            if (task.logs.length > lastLogIndex) {
+                                for (let i = lastLogIndex; i < task.logs.length; i++) {
+                                    buildLogs.value += task.logs[i];
+                                }
+                                lastLogIndex = task.logs.length;
+                                scrollToBottom();
+                            }
+                            
+                            if (task.completed) break;
+                            await new Promise(r => setTimeout(r, 1000));
+                        }
+                    } catch (e) {
+                        buildLogs.value += `!!! Error: ${e.message}\n`;
+                    } finally {
+                        building.value = false;
+                        fetchFleet();
                     }
-                    building.value = false;
-                    fetchFleet();
                 };
 
                 const startFlash = async (profile, deviceId, method) => {

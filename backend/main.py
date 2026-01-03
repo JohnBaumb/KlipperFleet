@@ -45,6 +45,27 @@ build_mgr = BuildManager(KLIPPER_DIR, ARTIFACTS_DIR)
 flash_mgr = FlashManager(KLIPPER_DIR, KATAPULT_DIR)
 fleet_mgr = FleetManager(DATA_DIR)
 
+class TaskStore:
+    def __init__(self):
+        self.tasks = {}
+
+    def create_task(self, task_id: str):
+        self.tasks[task_id] = {"status": "running", "logs": [], "completed": False}
+
+    def add_log(self, task_id: str, log: str):
+        if task_id in self.tasks:
+            self.tasks[task_id]["logs"].append(log)
+
+    def complete_task(self, task_id: str, status: str = "completed"):
+        if task_id in self.tasks:
+            self.tasks[task_id]["status"] = status
+            self.tasks[task_id]["completed"] = True
+
+    def get_task(self, task_id: str):
+        return self.tasks.get(task_id)
+
+task_store = TaskStore()
+
 class ConfigValue(BaseModel):
     name: str
     value: str
@@ -88,7 +109,6 @@ async def post_config_tree(preview: ConfigPreview, request: Request) -> List[Dic
     try:
         kconfig_mgr.load_kconfig(config_path)
         # Apply unsaved values in multiple passes to handle deep dependencies
-        # (e.g. Architecture -> Processor -> Comm Interface -> CAN Pins)
         for i in range(10):
             for item in preview.values:
                 try:
@@ -155,7 +175,6 @@ async def build_profile(profile: str):
 async def manage_klipper_services(action: str):
     """Stops or starts all Klipper-related services."""
     try:
-        # Find all services starting with klipper (but not klipperfleet) or moonraker
         cmd = "systemctl list-units --type=service --all --no-legend 'klipper*' 'moonraker*' | awk '{print $1}'"
         process = await asyncio.create_subprocess_shell(
             cmd,
@@ -179,84 +198,89 @@ async def manage_klipper_services(action: str):
     except Exception as e:
         return f">>> Error managing services: {str(e)}\n"
 
+@app.get("/batch/status/{task_id}")
+async def get_batch_status(task_id: str):
+    task = task_store.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
+
 @app.get("/batch/{action}")
-async def batch_operation(action: str):
+async def batch_operation(action: str, background_tasks: BackgroundTasks):
     """Performs batch operations (build, flash-ready, flash-all, etc.)"""
-    async def generate():
+    task_id = f"batch_{int(asyncio.get_event_loop().time())}"
+    task_store.create_task(task_id)
+
+    async def run_task():
         try:
             devices = fleet_mgr.get_fleet()
             
             # 1. Build phase
             if "build" in action:
+                task_store.add_log(task_id, ">>> STARTING BATCH BUILD PHASE <<<\n")
                 profiles_to_build = list(set(d['profile'] for d in devices if d['profile']))
                 if not profiles_to_build:
-                    yield ">>> No profiles assigned to fleet devices. Skipping build.\n"
+                    task_store.add_log(task_id, ">>> No profiles assigned to fleet devices. Skipping build.\n")
                 else:
                     for profile in profiles_to_build:
-                        yield f"\n>>> BATCH BUILD: Starting {profile}...\n"
+                        task_store.add_log(task_id, f"\n>>> BATCH BUILD: Starting {profile}...\n")
                         config_path = os.path.join(PROFILES_DIR, f"{profile}.config")
                         async for log in build_mgr.run_build(config_path):
-                            yield log
-                        yield f">>> BATCH BUILD: Finished {profile}\n"
+                            task_store.add_log(task_id, log)
+                        task_store.add_log(task_id, f">>> BATCH BUILD: Finished {profile}\n")
             
             # 2. Flash phase
             if "flash" in action:
-                yield "\n>>> BATCH FLASH: Starting...\n"
+                task_store.add_log(task_id, "\n>>> BATCH FLASH: Starting...\n")
                 
-                # 2a. Pre-flash: Identify devices needing reboot while services are still running
+                # Record initial serial devices to avoid misidentifying bridges later
+                initial_serials = [d['id'] for d in await flash_mgr.discover_serial_devices(skip_moonraker=True)]
+
+                task_store.add_log(task_id, ">>> Checking device statuses...\n")
                 reboot_tasks = []
-                if action == "build-flash-all" or action == "flash-all":
-                    yield ">>> Checking for devices in service that need rebooting to Katapult...\n"
-                    for dev in devices:
-                        if not dev.get('profile'):
-                            continue
-                        
-                        # Skip bridge hosts for now, they must stay in service to flash others
-                        if dev.get('is_bridge'):
-                            continue
-                            
-                        status = await flash_mgr.check_device_status(dev['id'], dev['method'])
-                        # Reboot if it's in service AND (marked as Katapult OR is a CAN device)
-                        if status == "service" and (dev.get('is_katapult') or dev['method'] == 'can'):
+                device_statuses = {}
+                for dev in devices:
+                    if not dev.get('profile'):
+                        continue
+                    status = await flash_mgr.check_device_status(dev['id'], dev['method'])
+                    device_statuses[dev['id']] = status
+                    
+                    if status == "service":
+                        # If it's not a bridge, we can reboot it now
+                        if not dev.get('is_bridge') and (dev.get('is_katapult') or dev['method'] == 'can'):
                             reboot_tasks.append({"id": dev['id'], "method": dev['method'], "name": dev['name']})
                 
                 if reboot_tasks:
-                    yield ">>> Triggering Firmware Restart to enter bootloader mode...\n"
+                    task_store.add_log(task_id, ">>> Triggering Firmware Restart to enter bootloader mode...\n")
                     await flash_mgr.trigger_firmware_restart()
-                    await asyncio.sleep(2) # Give it a moment to process
+                    await asyncio.sleep(2) 
 
                 # Now stop services to clear the bus
-                yield await manage_klipper_services("stop")
-                await asyncio.sleep(2) # Let the bus settle
+                task_store.add_log(task_id, await manage_klipper_services("stop"))
+                await asyncio.sleep(2) 
                 
                 if reboot_tasks:
                     for dev_info in reboot_tasks:
-                        yield f">>> Requesting Katapult reboot for {dev_info['name']} ({dev_info['id']})...\n"
-                        async for log in flash_mgr.reboot_to_katapult(dev_info['id'], dev_info['method']):
-                            yield log
+                        task_store.add_log(task_id, f">>> Requesting Katapult reboot for {dev_info['name']} ({dev_info['id']})...\n")
+                        async for log in flash_mgr.reboot_to_katapult(dev_info['id'], dev_info['method'], is_bridge=False):
+                            task_store.add_log(task_id, log)
                     
-                    yield ">>> Waiting for devices to enter Katapult mode (up to 30s)...\n"
-                    for i in range(15): # 15 * 2s = 30s
+                    task_store.add_log(task_id, ">>> Waiting for devices to enter Katapult mode (up to 30s)...\n")
+                    for i in range(15): 
                         await asyncio.sleep(2)
                         ready_count = 0
                         for dev_info in reboot_tasks:
                             status = await flash_mgr.check_device_status(dev_info['id'], dev_info['method'])
                             if status == "ready":
                                 ready_count += 1
-                            elif status == "service" and i > 0 and i % 3 == 0:
-                                yield f">>> Device {dev_info['name']} still in service. Retrying reboot...\n"
-                                async for log in flash_mgr.reboot_to_katapult(dev_info['id'], dev_info['method']):
-                                    yield log
                         
                         if ready_count == len(reboot_tasks):
-                            yield f">>> All {ready_count} devices are ready!\n"
+                            task_store.add_log(task_id, f">>> All {ready_count} devices are ready!\n")
                             break
-                        yield f">>> {ready_count}/{len(reboot_tasks)} devices ready... (waiting)\n"
-                    else:
-                        yield ">>> Timeout reached. Some devices may not have entered Katapult mode.\n"
+                        task_store.add_log(task_id, f">>> {ready_count}/{len(reboot_tasks)} devices ready... (waiting)\n")
 
                 # 2b. Actual flashing
-                # Sort devices: Non-bridges first, Bridges last
+                # Sort: Non-bridges first, Bridges last
                 sorted_devices = sorted(devices, key=lambda x: 1 if x.get('is_bridge') else 0)
                 
                 for dev in sorted_devices:
@@ -266,72 +290,113 @@ async def batch_operation(action: str):
                     # Check status
                     status = await flash_mgr.check_device_status(dev['id'], dev['method'])
                     
+                    # Bridge specific status handling
+                    if dev.get('is_bridge'):
+                        if status == "offline":
+                            # Check if it's already in Katapult mode on Serial
+                            current_serials = await flash_mgr.discover_serial_devices(skip_moonraker=True)
+                            eligible = [d for d in current_serials if "katapult" in d['id'].lower() or "canboot" in d['id'].lower()]
+                            if eligible:
+                                task_store.add_log(task_id, f">>> Found bridge {dev['name']} already in Katapult mode (Serial): {eligible[0]['id']}\n")
+                                status = "ready"
+                                dev['id'] = eligible[0]['id']
+                                dev['method'] = "serial"
+                            elif await flash_mgr.is_interface_up(dev.get('interface', 'can0')):
+                                # If interface is up but device not in scan, it's likely the bridge in service
+                                status = "service"
+                            elif device_statuses.get(dev['id']) == "service":
+                                status = "service"
+
                     should_flash = False
-                    if action == "flash-all" or action == "build-flash-all":
+                    if "flash-all" in action:
                         should_flash = True
-                    elif (action == "flash-ready" or action == "build-flash-ready") and status == "ready":
+                    elif "flash-ready" in action and status == "ready":
                         should_flash = True
                     
                     if should_flash:
-                        # If it's a bridge host and we need to flash it, we might need to reboot it first
-                        # but only AFTER all other devices are done.
-                        if dev.get('is_bridge') and status == "service" and dev.get('is_katapult'):
-                            yield f">>> Rebooting Bridge Host {dev['name']} to Katapult...\n"
-                            async for log in flash_mgr.reboot_to_katapult(dev['id'], dev['method']):
-                                yield log
-                            await asyncio.sleep(5) # Wait for bridge to come back in bootloader
-                            status = await flash_mgr.check_device_status(dev['id'], dev['method'])
+                        if dev.get('is_bridge') and status == "service":
+                            task_store.add_log(task_id, f">>> Rebooting Bridge Host {dev['name']} to Katapult...\n")
+                            
+                            # 1. Trigger the reboot
+                            async for log in flash_mgr.reboot_to_katapult(dev['id'], dev['method'], dev.get('interface', 'can0'), is_bridge=True):
+                                task_store.add_log(task_id, log)
+
+                            # 2. Wait for it to reappear as a SERIAL device (Katapult mode)
+                            task_store.add_log(task_id, ">>> Waiting for bridge to enter Katapult mode (Serial)...\n")
+                            await asyncio.sleep(2)
+                            new_device = None
+                            for _ in range(30):
+                                await asyncio.sleep(1)
+                                current_serials = await flash_mgr.discover_serial_devices(skip_moonraker=True)
+                                current_ids = [d['id'] for d in current_serials]
+                                
+                                # Look for a NEW serial device
+                                for cid in current_ids:
+                                    if cid not in initial_serials:
+                                        new_device = cid
+                                        break
+                                if new_device: break
+                                
+                                # Fallback: look for ANY Katapult device
+                                for d in current_serials:
+                                    if "katapult" in d['id'].lower() or "canboot" in d['id'].lower():
+                                        new_device = d['id']
+                                        break
+                                if new_device: break
+                            
+                            if new_device:
+                                dev['id'] = new_device
+                                dev['method'] = "serial"
+                                status = "ready"
+                                task_store.add_log(task_id, f">>> Bridge is now ready: {dev['id']}\n")
+                            else:
+                                task_store.add_log(task_id, "!!! Bridge did not enter Katapult mode. Skipping.\n")
+                                continue
 
                         if status != "ready" and dev['method'] != "linux":
-                            yield f"!!! Skipping {dev['name']} ({dev['id']}) - Device is {status}, not ready for flashing.\n"
+                            task_store.add_log(task_id, f"!!! Skipping {dev['name']} ({dev['id']}) - Device is {status}, not ready for flashing.\n")
                             continue
 
-                        yield f"\n>>> FLASHING {dev['name']} ({dev['id']}) with {dev['profile']}...\n"
-                        # Determine firmware path
-                        if dev['method'] == "linux":
-                            firmware_path = os.path.join(ARTIFACTS_DIR, f"{dev['profile']}.elf")
-                        else:
-                            firmware_path = os.path.join(ARTIFACTS_DIR, f"{dev['profile']}.bin")
+                        task_store.add_log(task_id, f"\n>>> FLASHING {dev['name']} ({dev['id']}) with {dev['profile']}...\n")
+                        firmware_path = os.path.join(ARTIFACTS_DIR, f"{dev['profile']}.elf" if dev['method'] == "linux" else f"{dev['profile']}.bin")
                         
                         if not os.path.exists(firmware_path):
-                            yield f"!!! Error: Firmware for {dev['profile']} not found. Skipping.\n"
+                            task_store.add_log(task_id, f"!!! Error: Firmware for {dev['profile']} not found. Skipping.\n")
                             continue
                             
                         if dev['method'] == "serial":
                             async for log in flash_mgr.flash_serial(dev['id'], firmware_path):
-                                yield log
+                                task_store.add_log(task_id, log)
                         elif dev['method'] == "can":
                             async for log in flash_mgr.flash_can(dev['id'], firmware_path):
-                                yield log
+                                task_store.add_log(task_id, log)
                         elif dev['method'] == "linux":
                             async for log in flash_mgr.flash_linux(firmware_path):
-                                yield log
+                                task_store.add_log(task_id, log)
                     else:
-                        yield f">>> Skipping {dev['name']} (Status: {status})\n"
+                        task_store.add_log(task_id, f">>> Skipping {dev['name']} (Status: {status})\n")
                 
-                yield "\n>>> BATCH FLASH COMPLETED <<<\n"
+                task_store.add_log(task_id, "\n>>> BATCH FLASH COMPLETED <<<\n")
                 
-            yield "\n>>> ALL BATCH OPERATIONS COMPLETED <<<\n"
+            task_store.add_log(task_id, "\n>>> ALL BATCH OPERATIONS COMPLETED <<<\n")
             
-            # 3. Return to service phase
             if "flash" in action:
-                yield ">>> Returning to service...\n"
-                for dev in devices:
-                    if dev.get('profile') and dev.get('is_katapult'):
-                        async for _ in flash_mgr.reboot_device(dev['id'], mode="service", method=dev['method']):
-                            pass
-        finally:
-            if "flash" in action:
-                yield await manage_klipper_services("start")
+                task_store.add_log(task_id, ">>> Returning to service...\n")
+                task_store.add_log(task_id, await manage_klipper_services("start"))
+            
+            task_store.complete_task(task_id)
+        except Exception as e:
+            task_store.add_log(task_id, f"!!! CRITICAL ERROR: {str(e)}\n")
+            task_store.complete_task(task_id, status="failed")
 
-    return StreamingResponse(generate(), media_type="text/plain")
+    background_tasks.add_task(run_task)
+    return {"task_id": task_id}
 
 @app.get("/download/{profile}")
 async def download_firmware(profile: str):
     """Downloads the klipper.bin for the specified profile."""
     bin_path = os.path.join(ARTIFACTS_DIR, f"{profile}.bin")
     if not os.path.exists(bin_path):
-        # Fallback to .elf if .bin doesn't exist (for Linux MCUs)
         bin_path = os.path.join(ARTIFACTS_DIR, f"{profile}.elf")
         
     if not os.path.exists(bin_path):
@@ -348,20 +413,21 @@ async def download_firmware(profile: str):
 async def get_fleet():
     """Returns the registered fleet of devices with status."""
     fleet = fleet_mgr.get_fleet()
-    
-    # Perform bulk discovery to avoid redundant tool calls
     can_devs = await flash_mgr.discover_can_devices()
     serial_devs = await flash_mgr.discover_serial_devices()
     linux_ready = os.path.exists("/tmp/klipper_host_mcu")
+    can0_up = await flash_mgr.is_interface_up("can0")
     
-    # Create a lookup for CAN devices
     can_status_map = {d['id']: d.get('mode', 'offline') for d in can_devs}
     serial_ids = [d['id'] for d in serial_devs]
 
-    # Add status to each device
     for dev in fleet:
         if dev['method'] == "can":
-            dev['status'] = can_status_map.get(dev['id'], "offline")
+            status = can_status_map.get(dev['id'], "offline")
+            # If it's a bridge and offline, but can0 is up, it's likely in service
+            if status == "offline" and dev.get('is_bridge') and can0_up:
+                status = "service"
+            dev['status'] = status
         elif dev['method'] == "serial":
             dev['status'] = "ready" if dev['id'] in serial_ids else "offline"
         elif dev['method'] == "linux":
@@ -394,7 +460,6 @@ async def discover_devices():
 @app.post("/flash")
 async def flash_device(req: FlashRequest):
     """Flashes the specified profile to a device."""
-    # Use the saved artifact for this profile
     if req.method == "linux":
         firmware_path = os.path.join(ARTIFACTS_DIR, f"{req.profile}.elf")
     else:
@@ -423,7 +488,14 @@ async def flash_device(req: FlashRequest):
 @app.post("/flash/reboot")
 async def reboot_device(device_id: str, mode: str = "katapult"):
     """Reboots a CAN device."""
-    return StreamingResponse(flash_mgr.reboot_device(device_id, mode), media_type="text/plain")
+    # Find device in fleet to check if it's a bridge
+    fleet = fleet_mgr.get_fleet()
+    dev = next((d for d in fleet if d['id'] == device_id), {})
+    is_bridge = dev.get('is_bridge', False)
+    method = dev.get('method', 'can')
+    interface = dev.get('interface', 'can0')
+    
+    return StreamingResponse(flash_mgr.reboot_device(device_id, mode, method=method, interface=interface, is_bridge=is_bridge), media_type="text/plain")
 
 @app.post("/api/self-update")
 async def self_update(background_tasks: BackgroundTasks):
@@ -432,24 +504,18 @@ async def self_update(background_tasks: BackgroundTasks):
     if not os.path.exists(update_script):
         raise HTTPException(status_code=404, detail="Update script not found")
     
-    # Run git fetch/reset immediately to see if it works
     try:
-        import subprocess
         subprocess.check_call(["git", "fetch", "origin"], cwd=os.path.dirname(os.path.dirname(__file__)))
         subprocess.check_call(["git", "reset", "--hard", "origin/main"], cwd=os.path.dirname(os.path.dirname(__file__)))
     except Exception:
         pass
 
     def run_update():
-        # Use nohup or similar to ensure the script continues after the service restarts
         subprocess.Popen(["bash", update_script], start_new_session=True)
 
     background_tasks.add_task(run_update)
     return {"message": "Update started. The service will restart shortly."}
 
-# Serve UI
-# Try to serve from the repository's ui folder first (for easier updates)
-# Fallback to the data directory if not found
 REPO_UI_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ui")
 DATA_UI_DIR = os.path.join(DATA_DIR, "ui")
 
@@ -461,4 +527,3 @@ elif os.path.exists(DATA_UI_DIR):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8321)
-

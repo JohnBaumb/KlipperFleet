@@ -10,27 +10,29 @@ class FlashManager:
         self.klipper_dir = klipper_dir
         self.katapult_dir = katapult_dir
 
-    async def discover_serial_devices(self) -> List[Dict[str, str]]:
+    async def discover_serial_devices(self, skip_moonraker: bool = False) -> List[Dict[str, str]]:
         """Lists all serial devices in /dev/serial/by-id/ and common UART ports."""
         devices = []
         
         # 1. USB Serial devices (by-id is preferred for stability)
         usb_devs = glob.glob("/dev/serial/by-id/*")
         
-        # 2. Common UART devices (often used for direct GPIO connection)
-        # We only include these if they exist AND are configured in Moonraker.
-        # This prevents showing the system console or other non-MCU UARTs.
-        uart_candidates = ["/dev/ttyAMA0", "/dev/ttyS0", "/dev/ttyUSB0"]
+        # 2. Common UART and CDC-ACM devices
+        # We include /dev/ttyACM* and /dev/ttyUSB* because some devices (especially in Katapult)
+        # might not immediately get a by-id link or might be generic.
+        candidates = glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*") + ["/dev/ttyAMA0", "/dev/ttyS0"]
         
-        moonraker_mcus = await self._get_moonraker_mcus()
+        moonraker_mcus = {}
+        if not skip_moonraker:
+            moonraker_mcus = await self._get_moonraker_mcus()
         
         # Combine and deduplicate
-        all_devs = list(set(usb_devs + [d for d in uart_candidates if os.path.exists(d)]))
+        # We use absolute paths for everything
+        all_devs = list(set(usb_devs + [os.path.abspath(d) for d in candidates if os.path.exists(d)]))
         
         for dev in all_devs:
             name = os.path.basename(dev)
             is_configured = dev in moonraker_mcus
-            dev_type = "serial"
             
             # If it's a by-id device, it's almost certainly an MCU
             if dev.startswith("/dev/serial/by-id/"):
@@ -38,6 +40,23 @@ class FlashManager:
                     name = f"{moonraker_mcus[dev]} ({name})"
                 devices.append({"id": dev, "name": name, "type": "usb"})
             
+            # If it's a ttyACM/ttyUSB device, we show it if it's NOT already represented by a by-id link
+            # or if it's configured in Klipper.
+            elif dev.startswith("/dev/ttyACM") or dev.startswith("/dev/ttyUSB"):
+                # Check if this physical device is already in devices via by-id
+                # (This is a bit tricky, but usually by-id is a symlink to ttyACM/USB)
+                real_path = os.path.realpath(dev)
+                already_added = False
+                for d in devices:
+                    if os.path.realpath(d['id']) == real_path:
+                        already_added = True
+                        break
+                
+                if not already_added:
+                    if is_configured:
+                        name = f"{moonraker_mcus[dev]} ({name})"
+                    devices.append({"id": dev, "name": name, "type": "usb"})
+
             # If it's a raw UART device, only show it if it's actually configured in Klipper
             elif is_configured:
                 name = f"{moonraker_mcus[dev]} ({name})"
@@ -78,8 +97,28 @@ class FlashManager:
         except Exception as e:
             print(f"Error sending FIRMWARE_RESTART: {e}")
 
+    async def ensure_canbus_up(self, interface: str = "can0", bitrate: int = 1000000):
+        """Ensures the CAN interface is up."""
+        try:
+            # Check if up
+            process = await asyncio.create_subprocess_exec(
+                "ip", "link", "show", interface,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, _ = await process.communicate()
+            if b"state UP" not in stdout:
+                print(f"Bringing up {interface}...")
+                await asyncio.create_subprocess_exec(
+                    "sudo", "ip", "link", "set", interface, "up", "type", "can", "bitrate", str(bitrate)
+                )
+                await asyncio.sleep(1)
+        except Exception as e:
+            print(f"Error ensuring CAN up: {e}")
+
     async def discover_can_devices(self) -> List[Dict[str, str]]:
         """Discovers CAN devices using Klipper's canbus_query.py, Katapult's flashtool.py, and Moonraker API in parallel."""
+        await self.ensure_canbus_up()
         seen_uuids = {} # uuid -> device_dict
 
         async def run_klipper_query():
@@ -183,6 +222,19 @@ class FlashManager:
             "name": "Linux Process (Host MCU)"
         }]
 
+    async def is_interface_up(self, interface: str = "can0") -> bool:
+        """Checks if a network interface is UP."""
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "ip", "link", "show", interface,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, _ = await process.communicate()
+            return b"state UP" in stdout or b"state UNKNOWN" in stdout # UNKNOWN can happen for some virtual/bridge interfaces
+        except Exception:
+            return False
+
     async def check_device_status(self, device_id: str, method: str) -> str:
         """Checks if a device is reachable and its current mode."""
         method = method.lower()
@@ -199,10 +251,10 @@ class FlashManager:
             return "ready" if os.path.exists("/tmp/klipper_host_mcu") else "offline"
         return "unknown"
 
-    async def reboot_device(self, device_id: str, mode: str = "katapult", method: str = "can", interface: str = "can0") -> AsyncGenerator[str, None]:
+    async def reboot_device(self, device_id: str, mode: str = "katapult", method: str = "can", interface: str = "can0", is_bridge: bool = False) -> AsyncGenerator[str, None]:
         """Reboots a device, either to Katapult or a regular reboot."""
         if mode == "katapult":
-            async for line in self.reboot_to_katapult(device_id, method=method, interface=interface):
+            async for line in self.reboot_to_katapult(device_id, method=method, interface=interface, is_bridge=is_bridge):
                 yield line
         else:
             if method == "can":
@@ -262,23 +314,78 @@ print("Jump command sent to UUID {device_id}")
                 # but usually serial devices jump to app after flash or timeout.
                 yield f">>> Serial device {device_id} will return to service after flash or timeout.\n"
 
-    async def reboot_to_katapult(self, device_id: str, method: str = "can", interface: str = "can0") -> AsyncGenerator[str, None]:
+    async def reboot_to_katapult(self, device_id: str, method: str = "can", interface: str = "can0", is_bridge: bool = False) -> AsyncGenerator[str, None]:
         """Sends a reboot command to a device to enter Katapult."""
         yield f">>> Requesting reboot to Katapult for {device_id}...\n"
         method = method.lower()
         if method == "can":
-            cmd = [
-                "python3", os.path.join(self.katapult_dir, "scripts", "flashtool.py"),
-                "-i", interface,
-                "-u", device_id,
-                "-r"
-            ]
-        else: # serial
-            cmd = [
-                "python3", os.path.join(self.katapult_dir, "scripts", "flashtool.py"),
-                "-d", device_id,
-                "-r"
-            ]
+            # For bridges, flashtool.py -r is much more reliable as it handles USB reconnects
+            if is_bridge:
+                yield ">>> Bridge detected, using flashtool.py for reboot...\n"
+                cmd = [
+                    "python3", os.path.join(self.katapult_dir, "scripts", "flashtool.py"),
+                    "-i", interface,
+                    "-u", device_id,
+                    "-r"
+                ]
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT
+                )
+                stdout, _ = await process.communicate()
+                yield stdout.decode()
+                return
+
+            # For regular CAN nodes, we try to send the raw jump command first as it's faster
+            py_cmd = f"""
+import socket, struct, sys
+try:
+    s = socket.socket(socket.AF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
+    s.bind(("{interface}",))
+    uuid = bytes.fromhex("{device_id}")
+    msg = bytes([0x16]) + uuid
+    msg = msg + bytes([0] * (8 - len(msg)))
+    frame = struct.pack("<IB3x8s", 0x3f0, 7, msg)
+    s.send(frame)
+    print("Jump command sent")
+except Exception as e:
+    print(f"Error: {{e}}", file=sys.stderr)
+    sys.exit(1)
+"""
+            process = await asyncio.create_subprocess_exec(
+                "python3", "-c", py_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT
+            )
+            stdout, stderr = await process.communicate()
+            if process.returncode == 0:
+                yield stdout.decode()
+            else:
+                yield f"!!! Error sending jump command: {stdout.decode()}\n"
+                # Fallback to flashtool.py
+                yield ">>> Falling back to flashtool.py...\n"
+                cmd = [
+                    "python3", os.path.join(self.katapult_dir, "scripts", "flashtool.py"),
+                    "-i", interface,
+                    "-u", device_id,
+                    "-r"
+                ]
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT
+                )
+                stdout, _ = await process.communicate()
+                yield stdout.decode()
+            return
+
+        # Fallback/Serial method
+        cmd = [
+            "python3", os.path.join(self.katapult_dir, "scripts", "flashtool.py"),
+            "-d", device_id,
+            "-r"
+        ]
         
         process = await asyncio.create_subprocess_exec(
             *cmd,

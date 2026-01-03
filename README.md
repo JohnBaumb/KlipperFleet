@@ -32,6 +32,18 @@ KlipperFleet is a "one-stop-shop" for managing Klipper firmware across your enti
 ### Fleet Manager
 ![Fleet Manager](https://raw.githubusercontent.com/JohnBaumb/KlipperFleet/main/images/fleet_manager.png)
 
+## Prerequisites
+
+KlipperFleet expects the following projects to be installed in your home directory:
+
+- **Klipper**: Located at `~/klipper`. Used for source code and Kconfig definitions.
+- **Katapult**: Located at `~/katapult`. Used for flashing via `flashtool.py`.
+
+The system also requires:
+- **can-utils**: For managing CAN interfaces.
+- **Python 3.9+**: With `venv` support.
+- **Sudo Access**: The service needs passwordless sudo for `systemctl` (service management) and `ip link` (CAN management).
+
 ## Installation
 
 Run this one-liner on your Raspberry Pi:
@@ -102,6 +114,12 @@ If the entry does not appear, you can manually add it to `.theme/navi.json`:
 - **Kconfig Engine**: `kconfiglib`
 - **Frontend**: Vue.js 3, Tailwind CSS
 - **Flashing**: Katapult (`flashtool.py`)
+
+### Directory Structure
+KlipperFleet stores its data in `~/printer_data/config/klipperfleet/`:
+- `profiles/`: Saved Kconfig `.config` files.
+- `artifacts/`: Compiled `.bin` and `.elf` firmware files.
+- `fleet.json`: Registry of your devices and their assigned profiles.
 
 ## License
 GPLv3
