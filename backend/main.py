@@ -304,7 +304,8 @@ async def batch_operation(action: str):
                             async for log in flash_mgr.flash_can(dev['id'], firmware_path):
                                 yield log
                         elif dev['method'] == "linux":
-                            yield ">>> Linux Process 'flashing' is handled by the build process.\n"
+                            async for log in flash_mgr.flash_linux(firmware_path):
+                                yield log
                     else:
                         yield f">>> Skipping {dev['name']} (Status: {status})\n"
                 
@@ -412,9 +413,8 @@ async def flash_device(req: FlashRequest):
                 async for log in flash_mgr.flash_can(req.device_id, firmware_path):
                     yield log
             elif req.method == "linux":
-                yield ">>> Linux Process 'flashing' is handled by the build process (klipper-mcu service).\n"
-                yield ">>> Ensure you have run 'make flash' manually or the klipper-mcu service is configured.\n"
-                yield ">>> Success!\n"
+                async for log in flash_mgr.flash_linux(firmware_path):
+                    yield log
         finally:
             yield await manage_klipper_services("start")
 

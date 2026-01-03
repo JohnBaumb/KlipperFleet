@@ -323,6 +323,31 @@ print("Jump command sent to UUID {device_id}")
         async for line in self._run_flash_command(cmd):
             yield line
 
+    async def flash_linux(self, firmware_path: str) -> AsyncGenerator[str, None]:
+        """'Flashes' the Linux process by installing the binary to /usr/local/bin/klipper_mcu."""
+        yield f">>> Installing Linux MCU binary: {firmware_path}...\n"
+        try:
+            # 1. Copy to /usr/local/bin/klipper_mcu
+            cmd = ["sudo", "cp", firmware_path, "/usr/local/bin/klipper_mcu"]
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT
+            )
+            stdout, _ = await process.communicate()
+            if process.returncode != 0:
+                yield f"!!! Error copying binary: {stdout.decode()}\n"
+                return
+
+            # 2. Ensure it's executable
+            cmd = ["sudo", "chmod", "+x", "/usr/local/bin/klipper_mcu"]
+            process = await asyncio.create_subprocess_exec(*cmd)
+            await process.wait()
+
+            yield ">>> Linux MCU binary installed successfully.\n"
+        except Exception as e:
+            yield f"!!! Error during Linux MCU installation: {str(e)}\n"
+
     async def _run_flash_command(self, cmd: list) -> AsyncGenerator[str, None]:
         process = await asyncio.create_subprocess_exec(
             *cmd,
