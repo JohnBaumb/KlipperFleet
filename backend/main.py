@@ -117,6 +117,11 @@ async def post_config_tree(preview: ConfigPreview, request: Request) -> List[Dic
                     pass
             
         return kconfig_mgr.get_menu_tree()
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404, 
+            detail="Kconfig file not found. This is usually caused by a user running Kalico (unsupported but on the roadmap) or Klipper is not installed in the default location."
+        )
     except Exception as e:
         import traceback
         error_detail = traceback.format_exc()
@@ -144,6 +149,11 @@ async def save_profile(profile: ProfileSave):
         save_path = os.path.join(PROFILES_DIR, f"{profile.name}.config")
         kconfig_mgr.save_config(save_path)
         return {"message": f"Profile {profile.name} saved successfully"}
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404, 
+            detail="Kconfig file not found. This is usually caused by a user running Kalico (unsupported but on the roadmap) or Klipper is not installed in the default location."
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
