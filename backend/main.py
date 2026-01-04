@@ -156,12 +156,17 @@ class AttachRequest(BaseModel):
     method: str
 
 @app.get("/api/status")
-async def get_status() -> Dict[str, str]:
-    return {"message": "KlipperFleet API is running", "klipper_dir": KLIPPER_DIR}
+async def get_status() -> Dict[str, Any]:
+    return {
+        "message": "KlipperFleet API is running", 
+        "klipper_dir": KLIPPER_DIR,
+        "is_klipper_kconfiglib": kconfig_mgr.is_klipper_kconfiglib
+    }
 
 class ConfigPreview(BaseModel):
     profile: Optional[str] = None
     values: List[ConfigValue] = []
+    show_optional: bool = False
 
 @app.post("/config/tree")
 async def post_config_tree(preview: ConfigPreview, request: Request) -> List[Dict[str, Any]]:
@@ -182,7 +187,7 @@ async def post_config_tree(preview: ConfigPreview, request: Request) -> List[Dic
                 except Exception:
                     pass
             
-        return kconfig_mgr.get_menu_tree()
+        return kconfig_mgr.get_menu_tree(show_optional=preview.show_optional)
     except FileNotFoundError:
         raise HTTPException(
             status_code=404, 
@@ -194,9 +199,9 @@ async def post_config_tree(preview: ConfigPreview, request: Request) -> List[Dic
         raise HTTPException(status_code=500, detail=error_detail)
 
 @app.get("/config/tree")
-async def get_config_tree(request: Request, profile: Optional[str] = None) -> List[Dict[str, Any]]:
+async def get_config_tree(request: Request, profile: Optional[str] = None, show_optional: bool = False) -> List[Dict[str, Any]]:
     """Returns the full Kconfig tree, optionally loaded with a profile's values."""
-    return await post_config_tree(ConfigPreview(profile=profile), request)
+    return await post_config_tree(ConfigPreview(profile=profile, show_optional=show_optional), request)
 
 @app.post("/config/save")
 async def save_profile(profile: ProfileSave) -> Dict[str, str]:
@@ -367,6 +372,7 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
             # 2. Flash phase
             if "flash" in action:
                 if task_store.is_cancelled(task_id): return
+                task_store.tasks[task_id]["is_bus_task"] = True
                 task_store.add_log(task_id, "\n>>> BATCH FLASH: Starting...\n")
                 
                 task_store.add_log(task_id, ">>> Checking device statuses before stopping services...\n")
@@ -628,29 +634,36 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                             task_store.add_log(task_id, f"!!! Error: Firmware for {dev['profile']} not found. Skipping.\n")
                             continue
                             
-                        if dev['method'] == "serial":
-                            # Resolve ID in case it changed during reboot (e.g. Klipper -> Katapult)
-                            resolved_id: str = await flash_mgr.resolve_serial_id(dev['id'])
-                            if resolved_id != dev['id']:
-                                task_store.add_log(task_id, f">>> Resolved serial ID: {dev['id']} -> {resolved_id}\n")
+                        task_store.update_device_status(task_id, dev['id'], "flashing")
+                        try:
+                            if dev['method'] == "serial":
+                                # Resolve ID in case it changed during reboot (e.g. Klipper -> Katapult)
+                                resolved_id: str = await flash_mgr.resolve_serial_id(dev['id'])
+                                if resolved_id != dev['id']:
+                                    task_store.add_log(task_id, f">>> Resolved serial ID: {dev['id']} -> {resolved_id}\n")
+                                
+                                async for log in flash_mgr.flash_serial(resolved_id, firmware_path):
+                                    if task_store.is_cancelled(task_id): return
+                                    task_store.add_log(task_id, log)
+                            elif dev['method'] == "can":
+                                async for log in flash_mgr.flash_can(dev['id'], firmware_path):
+                                    if task_store.is_cancelled(task_id): return
+                                    task_store.add_log(task_id, log)
+                            elif dev['method'] == "dfu":
+                                resolved_id: str = await flash_mgr.resolve_dfu_id(dev['id'], known_dfu_id=dev.get('dfu_id'))
+                                offset: str = get_flash_offset(dev['profile'])
+                                async for log in flash_mgr.flash_dfu(resolved_id, firmware_path, address=offset, leave=dev.get('use_dfu_exit', True)):
+                                    if task_store.is_cancelled(task_id): return
+                                    task_store.add_log(task_id, log)
+                            elif dev['method'] == "linux":
+                                async for log in flash_mgr.flash_linux(firmware_path):
+                                    if task_store.is_cancelled(task_id): return
+                                    task_store.add_log(task_id, log)
                             
-                            async for log in flash_mgr.flash_serial(resolved_id, firmware_path):
-                                if task_store.is_cancelled(task_id): return
-                                task_store.add_log(task_id, log)
-                        elif dev['method'] == "can":
-                            async for log in flash_mgr.flash_can(dev['id'], firmware_path):
-                                if task_store.is_cancelled(task_id): return
-                                task_store.add_log(task_id, log)
-                        elif dev['method'] == "dfu":
-                            resolved_id: str = await flash_mgr.resolve_dfu_id(dev['id'], known_dfu_id=dev.get('dfu_id'))
-                            offset: str = get_flash_offset(dev['profile'])
-                            async for log in flash_mgr.flash_dfu(resolved_id, firmware_path, address=offset, leave=dev.get('use_dfu_exit', True)):
-                                if task_store.is_cancelled(task_id): return
-                                task_store.add_log(task_id, log)
-                        elif dev['method'] == "linux":
-                            async for log in flash_mgr.flash_linux(firmware_path):
-                                if task_store.is_cancelled(task_id): return
-                                task_store.add_log(task_id, log)
+                            task_store.update_device_status(task_id, dev['id'], "ready")
+                        except Exception as e:
+                            task_store.add_log(task_id, f"!!! Error flashing {dev['name']}: {str(e)}\n")
+                            task_store.update_device_status(task_id, dev['id'], "failed")
                     else:
                         task_store.add_log(task_id, f">>> Skipping {dev['name']} (Status: {status})\n")
                 
@@ -688,29 +701,59 @@ async def download_firmware(profile: str) -> FileResponse:
     )
 
 @app.get("/fleet")
-async def get_fleet() -> List[Dict[str, Any]]:
+async def get_fleet(fast: bool = False) -> List[Dict[str, Any]]:
     """Returns the registered fleet of devices with status."""
     fleet: List[Dict[str, Any]] = fleet_mgr.get_fleet()
     
     # Check for active tasks to get real-time status overrides
     status_overrides = {}
     is_task_running = False
+    is_bus_task_running = False
     for tid, task in task_store.tasks.items():
         if task.get("status") == "running":
             status_overrides.update(task.get("device_statuses", {}))
             is_task_running = True
+            if task.get("is_bus_task"):
+                is_bus_task_running = True
+
+    # Check if locks are held
+    can_locked = flash_mgr._can_lock.locked()
+    dfu_locked = flash_mgr._dfu_lock.locked()
     
+    if fast:
+        for dev in fleet:
+            # 1. Check overrides (e.g. "Flashing...")
+            if dev['id'] in status_overrides:
+                dev['status'] = status_overrides[dev['id']]
+            # 2. Check if bus is busy (only if a task is actually running)
+            elif dev['method'] == 'can' and can_locked and is_bus_task_running:
+                dev['status'] = 'bus_busy'
+            # 3. Default to querying
+            else:
+                dev['status'] = 'querying'
+            
+            if dev.get('dfu_id'):
+                if dev['dfu_id'] in status_overrides:
+                    dev['dfu_status'] = status_overrides[dev['dfu_id']]
+                elif dfu_locked and is_bus_task_running:
+                    dev['dfu_status'] = 'bus_busy'
+                else:
+                    dev['dfu_status'] = 'querying'
+        return fleet
+
     for dev in fleet:
         # If we have a real-time override from an active task, use it
         if dev['id'] in status_overrides:
             dev['status'] = status_overrides[dev['id']]
+        elif dev['method'] == 'can' and can_locked and is_bus_task_running:
+            dev['status'] = 'bus_busy'
         else:
-            # Skip moonraker if a task is running (services likely stopped)
+            # Skip moonraker if a bus task is running (services likely stopped)
             dev['status'] = await flash_mgr.check_device_status(
                 dev['id'], 
                 dev['method'], 
                 dfu_id=dev.get('dfu_id'),
-                skip_moonraker=is_task_running,
+                skip_moonraker=is_bus_task_running,
                 is_bridge=dev.get('is_bridge', False),
                 interface=dev.get('interface', 'can0')
             )
@@ -718,6 +761,8 @@ async def get_fleet() -> List[Dict[str, Any]]:
         if dev.get('dfu_id'):
             if dev['dfu_id'] in status_overrides:
                 dev['dfu_status'] = status_overrides[dev['dfu_id']]
+            elif dfu_locked and is_bus_task_running:
+                dev['dfu_status'] = 'bus_busy'
             else:
                 dev['dfu_status'] = await flash_mgr.check_device_status(
                     dev['dfu_id'],
@@ -762,7 +807,7 @@ async def remove_device(device_id: str) -> Dict[str, str]:
 async def discover_devices() -> Dict[str, List[Dict[str, Any]]]:
     """Discovers Serial, CAN, DFU, and Linux process devices."""
     serial_devs: List[Dict[str, Any]] = await flash_mgr.discover_serial_devices()
-    can_devs: List[Dict[str, Any]] = await flash_mgr.discover_can_devices()
+    can_devs: List[Dict[str, Any]] = await flash_mgr.discover_can_devices(force=True)
     dfu_devs: List[Dict[str, Any]] = await flash_mgr.discover_dfu_devices()
     linux_devs: List[Dict[str, Any]] = flash_mgr.discover_linux_process()
     
@@ -785,6 +830,7 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
     """Flashes the specified profile to a device."""
     task_id: str = f"task_{int(asyncio.get_event_loop().time())}"
     task_store.create_task(task_id)
+    task_store.tasks[task_id]["is_bus_task"] = True
 
     if req.method == "linux":
         firmware_path: str = os.path.join(ARTIFACTS_DIR, f"{req.profile}.elf")
@@ -887,23 +933,30 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             if task_store.is_cancelled(task_id): return
 
             # 4. Flash
-            if actual_method == "serial":
-                async for log in flash_mgr.flash_serial(target_id, firmware_path):
-                    if task_store.is_cancelled(task_id): return
-                    yield log
-            elif actual_method == "can":
-                async for log in flash_mgr.flash_can(target_id, firmware_path):
-                    if task_store.is_cancelled(task_id): return
-                    yield log
-            elif actual_method == "dfu":
-                offset: str = get_flash_offset(req.profile)
-                async for log in flash_mgr.flash_dfu(target_id, firmware_path, address=offset, leave=req.use_dfu_exit):
-                    if task_store.is_cancelled(task_id): return
-                    yield log
-            elif actual_method == "linux":
-                async for log in flash_mgr.flash_linux(firmware_path):
-                    if task_store.is_cancelled(task_id): return
-                    yield log
+            task_store.update_device_status(task_id, req.device_id, "flashing")
+            try:
+                if actual_method == "serial":
+                    async for log in flash_mgr.flash_serial(target_id, firmware_path):
+                        if task_store.is_cancelled(task_id): return
+                        yield log
+                elif actual_method == "can":
+                    async for log in flash_mgr.flash_can(target_id, firmware_path):
+                        if task_store.is_cancelled(task_id): return
+                        yield log
+                elif actual_method == "dfu":
+                    offset: str = get_flash_offset(req.profile)
+                    async for log in flash_mgr.flash_dfu(target_id, firmware_path, address=offset, leave=req.use_dfu_exit):
+                        if task_store.is_cancelled(task_id): return
+                        yield log
+                elif actual_method == "linux":
+                    async for log in flash_mgr.flash_linux(firmware_path):
+                        if task_store.is_cancelled(task_id): return
+                        yield log
+                
+                task_store.update_device_status(task_id, req.device_id, "ready")
+            except Exception as e:
+                yield f"!!! Error during flash: {str(e)}\n"
+                task_store.update_device_status(task_id, req.device_id, "failed")
         except Exception as e:
             yield f"!!! Error during flash: {str(e)}\n"
         finally:
@@ -918,6 +971,7 @@ async def reboot_device(device_id: str, mode: str = "katapult", method: Optional
     """Reboots a device."""
     task_id: str = f"task_{int(asyncio.get_event_loop().time())}"
     task_store.create_task(task_id)
+    task_store.tasks[task_id]["is_bus_task"] = True
 
     # Find device in fleet to check if it's a bridge
     fleet: List[Dict[str, Any]] = fleet_mgr.get_fleet()

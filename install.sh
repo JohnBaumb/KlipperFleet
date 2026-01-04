@@ -84,6 +84,8 @@ fi
 
 # Install Python dependencies
 echo "KlipperFleet: Installing Python dependencies from requirements.txt..."
+# Explicitly uninstall kconfiglib if present (migration to internal Klipper lib)
+sudo -u $USER "$KF_VENV/bin/pip" uninstall -y kconfiglib || true
 sudo -u $USER "$KF_VENV/bin/pip" install -r "${SRCDIR}/backend/requirements.txt"
 
 # 5. Setup Data Directories

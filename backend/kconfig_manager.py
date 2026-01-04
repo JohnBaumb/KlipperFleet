@@ -1,12 +1,49 @@
-import kconfiglib
 import os
+import sys
 from typing import List, Dict, Any, Optional
+
+# Global placeholder for the kconfiglib module
+kconfiglib = None
+_is_klipper_kconfiglib = False
 
 class KconfigManager:
     def __init__(self, klipper_dir: str) -> None:
         self.klipper_dir: str = klipper_dir
         self.kconfig_file: str = os.path.join(klipper_dir, "src", "Kconfig")
         self.kconf = None
+        self._import_kconfiglib()
+
+    @property
+    def is_klipper_kconfiglib(self) -> bool:
+        return _is_klipper_kconfiglib
+
+    def _import_kconfiglib(self) -> None:
+        global kconfiglib, _is_klipper_kconfiglib
+        if kconfiglib is not None:
+            return
+
+        # Try to import from Klipper's lib/kconfiglib directory
+        kconfig_lib_path = os.path.join(self.klipper_dir, "lib", "kconfiglib")
+        if os.path.exists(kconfig_lib_path):
+            # Insert at the beginning of sys.path to prioritize Klipper's version
+            sys.path.insert(0, kconfig_lib_path)
+            try:
+                import kconfiglib as k_lib
+                kconfiglib = k_lib
+                _is_klipper_kconfiglib = True
+                print(f"Loaded kconfiglib from {kconfig_lib_path}")
+                return
+            except ImportError:
+                print(f"Failed to import kconfiglib from {kconfig_lib_path}")
+
+        # Fallback to system kconfiglib
+        try:
+            import kconfiglib as k_lib
+            kconfiglib = k_lib
+            _is_klipper_kconfiglib = False
+            print("Loaded system kconfiglib")
+        except ImportError:
+            raise ImportError("Could not load kconfiglib from Klipper directory or system.")
 
     def load_kconfig(self, config_file: Optional[str] = None) -> None:
         """Loads the Kconfig file and optionally an existing .config file."""
@@ -24,33 +61,46 @@ class KconfigManager:
         try:
             # kconfiglib.Kconfig will use the environment variables to resolve 'source' paths
             self.kconf = kconfiglib.Kconfig(self.kconfig_file, warn=False)
+            
+            # Force certain symbols to 'y' to improve UX (e.g. show optimization menus)
+            for sym_name in ["HAVE_LIMITED_CODE_SIZE", "LOW_LEVEL_OPTIONS"]:
+                if sym_name in self.kconf.syms:
+                    sym = self.kconf.syms[sym_name]
+                    # Use internal _set_value or user_value to bypass prompt checks
+                    sym.set_value(2) 
+                    if sym.tri_value == 0:
+                        # If still 'n', it's likely an internal symbol with no prompt.
+                        # We can't easily force it in kconfiglib without a 'select',
+                        # so we'll handle visibility in the tree parser instead.
+                        pass
+
             if config_file and os.path.exists(config_path := os.path.expanduser(config_file)):
                 self.kconf.load_config(config_path)
         finally:
             os.chdir(old_cwd)
 
-    def get_menu_tree(self) -> List[Dict[str, Any]]:
+    def get_menu_tree(self, show_optional: bool = False) -> List[Dict[str, Any]]:
         """Returns a JSON-serializable tree of the Kconfig menu."""
         if not self.kconf:
             self.load_kconfig()
         
         assert self.kconf is not None
-        return self._parse_menu_item(self.kconf.top_node)
+        return self._parse_menu_item(self.kconf.top_node, show_optional=show_optional)
 
-    def _parse_menu_item(self, node) -> List[Dict[str, Any]]:
+    def _parse_menu_item(self, node, show_optional: bool = False) -> List[Dict[str, Any]]:
         items = []
         curr = node.list
         while curr:
-            item: Dict[str, Any] | None = self._serialize_node(curr)
+            item: Dict[str, Any] | None = self._serialize_node(curr, show_optional=show_optional)
             if item:
                 # Recursively parse children if it's a menu or has a list
                 if curr.list:
-                    item["children"] = self._parse_menu_item(curr)
+                    item["children"] = self._parse_menu_item(curr, show_optional=show_optional)
                 items.append(item)
             curr = curr.next
         return items
 
-    def _serialize_node(self, node) -> Optional[Dict[str, Any]]:
+    def _serialize_node(self, node, show_optional: bool = False) -> Optional[Dict[str, Any]]:
         """Serializes a Kconfig node into a dictionary for the UI."""
         sym = node.item
         
@@ -60,21 +110,34 @@ class KconfigManager:
 
         # Check symbol visibility if it's a symbol or choice
         if isinstance(sym, (kconfiglib.Symbol, kconfiglib.Choice)):
-            if sym.visibility == 0:
+            # Symbols with no prompt are internal, don't show them
+            if not node.prompt:
+                return None
+            
+            # Force visibility for WANT_ symbols (Optional Features) if requested
+            is_want_sym = show_optional and sym.name and (sym.name.startswith("WANT_") or sym.name.startswith("CONFIG_WANT_"))
+            
+            # If it has a prompt but is currently invisible due to dependencies
+            if not is_want_sym and sym.visibility == 0:
                 return None
 
-        # Check prompt visibility (e.g. "prompt 'foo' if BAR")
-        prompt_text, prompt_cond = node.prompt
-        if kconfiglib.expr_value(prompt_cond) == 0:
-            return None
+        # If it's a menu or comment
+        if not isinstance(sym, (kconfiglib.Symbol, kconfiglib.Choice)):
+            if not node.prompt:
+                return None
+            
+            prompt_text, prompt_cond = node.prompt
+            # Force "Optional features" menu to be visible if requested
+            is_optional_menu = show_optional and "Optional features" in prompt_text
+            
+            if not is_optional_menu and kconfiglib.expr_value(prompt_cond) == 0:
+                return None
 
-        # If it's just a comment or menu without a symbol
-        if not isinstance(sym, kconfiglib.Symbol) and not isinstance(sym, kconfiglib.Choice):
             return {
                 "type": "menu" if node.list else "comment",
                 "prompt": prompt_text,
                 "help": getattr(node, 'help', None),
-                "visible": kconfiglib.expr_value(node.dep) > 0,
+                "visible": True,
             }
 
         # Handle Symbols and Choices
@@ -100,7 +163,7 @@ class KconfigManager:
             "default": sym.str_value,
             "value": sym.str_value,
             "help": getattr(node, 'help', None),
-            "visible": kconfiglib.expr_value(node.dep) > 0,
+            "visible": kconfiglib.expr_value(node.dep) > 0 or (show_optional and name and "WANT_" in name),
             "dep_str": str(node.dep),
             "choices": [],
             "readonly": False

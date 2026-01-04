@@ -17,6 +17,13 @@ class FlashManager:
         self._dfu_cache_time: float = 0.0
         self._dfu_cache_ttl_s: float = 1.0
 
+        # CAN operations (discovery, flashing) must be mutexed to prevent bus contention.
+        # High-bandwidth flashing can fail if background discovery queries are running.
+        self._can_lock: asyncio.Lock = asyncio.Lock()
+        self._can_cache: List[Dict[str, str]] = []
+        self._can_cache_time: float = 0.0
+        self._can_cache_ttl_s: float = 2.0 # Short TTL to keep status feeling "live"
+
     async def discover_serial_devices(self, skip_moonraker: bool = False) -> List[Dict[str, str]]:
         """Lists all serial devices in /dev/serial/by-id/ and common UART ports."""
         devices = []
@@ -262,113 +269,125 @@ class FlashManager:
         except Exception as e:
             print(f"Error ensuring CAN up: {e}")
 
-    async def discover_can_devices(self, skip_moonraker: bool = False) -> List[Dict[str, str]]:
+    async def discover_can_devices(self, skip_moonraker: bool = False, force: bool = False) -> List[Dict[str, str]]:
         """Discovers CAN devices using Klipper's canbus_query.py, Katapult's flashtool.py, and Moonraker API in parallel."""
         await self.ensure_canbus_up()
-        seen_uuids = {} # uuid -> device_dict
-
-        async def run_klipper_query():
-            try:
-                klipper_python: str = os.path.abspath(os.path.join(self.klipper_dir, "..", "klippy-env", "bin", "python3"))
-                if not os.path.exists(klipper_python):
-                    klipper_python = "python3"
-                
-                process: Process = await asyncio.create_subprocess_exec(
-                    klipper_python, os.path.join(self.klipper_dir, "scripts", "canbus_query.py"), "can0",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, _ = await asyncio.wait_for(process.communicate(), timeout=2.0)
-                results = []
-                for line in stdout.decode().splitlines():
-                    if "canbus_uuid=" in line:
-                        uuid: str = line.split("canbus_uuid=")[1].split(",")[0].strip()
-                        app = "Unknown"
-                        if "Application:" in line:
-                            app: str = line.split("Application:")[1].strip()
-                        results.append((uuid, app))
-                return results
-            except Exception:
-                return []
-
-        async def run_katapult_query():
-            try:
-                process: Process = await asyncio.create_subprocess_exec(
-                    "python3", os.path.join(self.katapult_dir, "scripts", "flashtool.py"), "-i", "can0", "-q",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=5.0)
-                results = []
-                output: str = stdout.decode()
-                for line in output.splitlines():
-                    if "UUID:" in line or "Detected UUID:" in line:
-                        parts: List[str] = line.replace("Detected UUID:", "UUID:").split(",")
-                        uuid: str = parts[0].split("UUID:")[1].strip()
-                        app = "Unknown"
-                        if len(parts) > 1 and "Application:" in parts[1]:
-                            app: str = parts[1].split("Application:")[1].strip()
-                        results.append((uuid, app))
-                return results
-            except Exception as e:
-                print(f"Katapult query error: {e}")
-                return []
-
-        # Run discovery methods sequentially to avoid CAN bus contention
-        katapult_res = await run_katapult_query()
-        klipper_res = await run_klipper_query()
         
-        moonraker_res = {}
-        if not skip_moonraker:
-            moonraker_res: Dict[str, Dict[str, str]] = await self._get_moonraker_mcus()
+        now: float = asyncio.get_event_loop().time()
+        if not force and (now - self._can_cache_time) < self._can_cache_ttl_s:
+            return list(self._can_cache)
 
-        # Merge results (Priority: Katapult > Klipper > Moonraker)
-        # 1. Katapult results (most accurate for bootloader status)
-        for uuid, app in katapult_res:
-            # If application is Klipper, it's in service. If Katapult/CanBoot, it's ready.
-            mode: str = "ready" if app.lower() in ["katapult", "canboot"] else "service"
-            seen_uuids[uuid] = {
-                "id": uuid, 
-                "name": f"CAN Device ({uuid})", 
-                "application": app,
-                "mode": mode
-            }
+        async with self._can_lock:
+            print(">>> CAN Lock Acquired for discovery")
+            seen_uuids = {} # uuid -> device_dict
 
-        # 2. Klipper results
-        for uuid, app in klipper_res:
-            if uuid not in seen_uuids:
+            async def run_klipper_query():
+                try:
+                    klipper_python: str = os.path.abspath(os.path.join(self.klipper_dir, "..", "klippy-env", "bin", "python3"))
+                    if not os.path.exists(klipper_python):
+                        klipper_python = "python3"
+                    
+                    process: Process = await asyncio.create_subprocess_exec(
+                        klipper_python, os.path.join(self.klipper_dir, "scripts", "canbus_query.py"), "can0",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    stdout, _ = await asyncio.wait_for(process.communicate(), timeout=2.0)
+                    results = []
+                    for line in stdout.decode().splitlines():
+                        if "canbus_uuid=" in line:
+                            uuid: str = line.split("canbus_uuid=")[1].split(",")[0].strip()
+                            app = "Unknown"
+                            if "Application:" in line:
+                                app: str = line.split("Application:")[1].strip()
+                            results.append((uuid, app))
+                    return results
+                except Exception:
+                    return []
+
+            async def run_katapult_query():
+                try:
+                    process: Process = await asyncio.create_subprocess_exec(
+                        "python3", os.path.join(self.katapult_dir, "scripts", "flashtool.py"), "-i", "can0", "-q",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=5.0)
+                    results = []
+                    output: str = stdout.decode()
+                    for line in output.splitlines():
+                        if "UUID:" in line or "Detected UUID:" in line:
+                            parts: List[str] = line.replace("Detected UUID:", "UUID:").split(",")
+                            uuid: str = parts[0].split("UUID:")[1].strip()
+                            app = "Unknown"
+                            if len(parts) > 1 and "Application:" in parts[1]:
+                                app: str = parts[1].split("Application:")[1].strip()
+                            results.append((uuid, app))
+                    return results
+                except Exception as e:
+                    print(f"Katapult query error: {e}")
+                    return []
+
+            # Run discovery methods sequentially to avoid CAN bus contention
+            katapult_res = await run_katapult_query()
+            klipper_res = await run_klipper_query()
+            
+            moonraker_res = {}
+            if not skip_moonraker:
+                moonraker_res: Dict[str, Dict[str, str]] = await self._get_moonraker_mcus()
+
+            # Merge results (Priority: Katapult > Klipper > Moonraker)
+            # 1. Katapult results (most accurate for bootloader status)
+            for uuid, app in katapult_res:
+                # If application is Klipper, it's in service. If Katapult/CanBoot, it's ready.
+                mode: str = "ready" if app.lower() in ["katapult", "canboot"] else "service"
                 seen_uuids[uuid] = {
                     "id": uuid, 
                     "name": f"CAN Device ({uuid})", 
                     "application": app,
-                    "mode": "service"
+                    "mode": mode
                 }
 
-        # 3. Moonraker results (name enrichment and fallback)
-        if isinstance(moonraker_res, dict):
-            for identifier, info in moonraker_res.items():
-                # Check if identifier looks like a UUID (12 hex chars)
-                if len(identifier) == 12 and all(c in '0123456789abcdef' for c in identifier):
-                    section_name = info["name"]
-                    if identifier in seen_uuids:
-                        if "CAN Device" in seen_uuids[identifier]["name"]:
-                            seen_uuids[identifier]["name"] = section_name
-                    else:
-                        # Fallback: Add it as 'service' if Moonraker knows about it
-                        # But only if it's actually active, otherwise mark as offline
-                        mode = "service" if info.get("active") else "offline"
-                        seen_uuids[identifier] = {
-                            "id": identifier,
-                            "name": section_name,
-                            "application": "Klipper (Configured)" if info.get("active") else "Klipper (Offline)",
-                            "mode": mode
-                        }
-                    
-                    # Add stats if available
-                    if info.get("stats"):
-                        seen_uuids[identifier]["stats"] = info["stats"]
+            # 2. Klipper results
+            for uuid, app in klipper_res:
+                if uuid not in seen_uuids:
+                    seen_uuids[uuid] = {
+                        "id": uuid, 
+                        "name": f"CAN Device ({uuid})", 
+                        "application": app,
+                        "mode": "service"
+                    }
 
-        return list(seen_uuids.values())
+            # 3. Moonraker results (name enrichment and fallback)
+            if isinstance(moonraker_res, dict):
+                for identifier, info in moonraker_res.items():
+                    # Check if identifier looks like a UUID (12 hex chars)
+                    if len(identifier) == 12 and all(c in '0123456789abcdef' for c in identifier):
+                        section_name = info["name"]
+                        if identifier in seen_uuids:
+                            if "CAN Device" in seen_uuids[identifier]["name"]:
+                                seen_uuids[identifier]["name"] = section_name
+                        else:
+                            # Fallback: Add it as 'service' if Moonraker knows about it
+                            # But only if it's actually active, otherwise mark as offline
+                            mode = "service" if info.get("active") else "offline"
+                            seen_uuids[identifier] = {
+                                "id": identifier,
+                                "name": section_name,
+                                "application": "Klipper (Configured)" if info.get("active") else "Klipper (Offline)",
+                                "mode": mode
+                            }
+                        
+                        # Add stats if available
+                        if info.get("stats"):
+                            seen_uuids[identifier]["stats"] = info["stats"]
+
+            results = list(seen_uuids.values())
+            self._can_cache = results
+            self._can_cache_time = asyncio.get_event_loop().time()
+            
+            print(">>> CAN Lock Released")
+            return results
 
     def discover_linux_process(self) -> List[Dict[str, str]]:
         """Returns the local Linux process MCU if it exists or as a target."""
@@ -579,7 +598,7 @@ class FlashManager:
                 
             return "offline"
         elif method == "linux":
-            return "ready" if os.path.exists("/tmp/klipper_host_mcu") else "offline"
+            return "service" if os.path.exists("/tmp/klipper_host_mcu") else "ready"
         return "unknown"
 
     async def reboot_device(self, device_id: str, mode: str = "katapult", method: str = "can", interface: str = "can0", is_bridge: bool = False) -> AsyncGenerator[str, None]:
@@ -692,21 +711,25 @@ print("Jump command sent to UUID {device_id}")
         yield f">>> Requesting reboot to Katapult for {device_id}...\n"
         method = method.lower()
         if method == "can":
-            # Using flashtool.py -r is much more reliable for all CAN nodes
-            cmd: List[str] = [
-                "python3", os.path.join(self.katapult_dir, "scripts", "flashtool.py"),
-                "-i", interface,
-                "-u", device_id,
-                "-r"
-            ]
-            process: Process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT
-            )
-            stdout, _ = await process.communicate()
-            yield stdout.decode()
-            return
+            async with self._can_lock:
+                yield f">>> CAN Lock Acquired for rebooting {device_id}\n"
+                # Using flashtool.py -r is much more reliable for all CAN nodes
+                cmd: List[str] = [
+                    "python3", os.path.join(self.katapult_dir, "scripts", "flashtool.py"),
+                    "-i", interface,
+                    "-u", device_id,
+                    "-r"
+                ]
+                process: Process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT
+                )
+                stdout, _ = await process.communicate()
+                yield stdout.decode()
+                self._can_cache_time = 0.0 # Invalidate cache
+                yield f">>> CAN Lock Released\n"
+                return
 
         # Serial method
         # 1. Try the 1200bps trick first (common for Katapult/CanBoot on Serial)
@@ -783,15 +806,19 @@ print("Jump command sent to UUID {device_id}")
 
     async def flash_can(self, uuid: str, firmware_path: str, interface: str = "can0") -> AsyncGenerator[str, None]:
         """Flashes a device via CAN using Katapult."""
-        yield f">>> Flashing {firmware_path} to {uuid} via {interface}...\n"
-        cmd: List[str] = [
-            "python3", os.path.join(self.katapult_dir, "scripts", "flashtool.py"),
-            "-i", interface,
-            "-u", uuid,
-            "-f", firmware_path
-        ]
-        async for line in self._run_flash_command(cmd):
-            yield line
+        async with self._can_lock:
+            yield f">>> CAN Lock Acquired for flashing {uuid}\n"
+            yield f">>> Flashing {firmware_path} to {uuid} via {interface}...\n"
+            cmd: List[str] = [
+                "python3", os.path.join(self.katapult_dir, "scripts", "flashtool.py"),
+                "-i", interface,
+                "-u", uuid,
+                "-f", firmware_path
+            ]
+            async for line in self._run_flash_command(cmd):
+                yield line
+            self._can_cache_time = 0.0 # Invalidate cache
+            yield f">>> CAN Lock Released\n"
 
     async def flash_dfu(self, device_id: str, firmware_path: str, address: str = "0x08000000", leave: bool = True) -> AsyncGenerator[str, None]:
         """Flashes a device in DFU mode using dfu-util."""
@@ -913,10 +940,11 @@ print("Jump command sent to UUID {device_id}")
         while True:
             if process.stdout is None:
                 break
-            line: bytes = await process.stdout.readline()
-            if not line:
+            # Read in chunks to handle progress bars (\r)
+            chunk: bytes = await process.stdout.read(128)
+            if not chunk:
                 break
-            yield line.decode()
+            yield chunk.decode(errors='replace')
 
         await process.wait()
         if process.returncode in ok_returncodes:

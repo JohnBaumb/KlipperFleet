@@ -44,7 +44,11 @@
                     <i class="fas fa-sync-alt mr-2" :class="updating ? 'fa-spin' : ''"></i> 
                     {{ updating ? 'Updating...' : 'Update KlipperFleet' }}
                 </button>
-                <div class="text-[10px] text-gray-500">v1.0.7-alpha</div>
+                <div v-if="!isKlipperKconfiglib" class="p-2 bg-red-900/30 border border-red-800/50 rounded text-[9px] text-red-400 leading-tight">
+                    <i class="fas fa-exclamation-triangle mr-1"></i>
+                    Using system kconfiglib. Please click Update to switch to Klipper's version for full compatibility.
+                </div>
+                <div class="text-[10px] text-gray-500">v1.0.8-alpha</div>
             </div>
         </aside>
 
@@ -61,6 +65,9 @@
                 <div class="flex items-center space-x-4">
                     <span v-if="building || flashing" class="flex items-center text-orange-400 text-sm">
                         <i class="fas fa-circle-notch fa-spin mr-2"></i> Processing...
+                    </span>
+                    <span v-if="querying && !building && !flashing" class="flex items-center text-blue-400 text-sm">
+                        <i class="fas fa-search fa-spin mr-2"></i> Querying Bus...
                     </span>
                     <div v-if="view === 'dashboard'" class="flex items-center space-x-2">
                         <button @click="runBatch('build-all')" :disabled="building || flashing" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-[10px] font-bold disabled:opacity-50 uppercase">
@@ -250,6 +257,10 @@
                                     <input type="checkbox" v-model="showRawSymbolNames" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500">
                                     <span class="text-[10px] text-gray-400 group-hover:text-gray-200 uppercase font-bold">Show Raw Symbol Names</span>
                                 </label>
+                                <label class="flex items-center space-x-2 cursor-pointer group mt-2" title="Show optional features that are normally hidden (e.g. for low-memory MCUs).">
+                                    <input type="checkbox" v-model="showOptionalFeatures" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500">
+                                    <span class="text-[10px] text-gray-400 group-hover:text-gray-200 uppercase font-bold">Show Optional Features</span>
+                                </label>
                             </div>
                         </div>
                     </div>
@@ -260,8 +271,8 @@
                     <div class="mainsail-card rounded-lg p-6">
                         <div class="flex justify-between items-center mb-6">
                             <h3 class="text-lg font-bold text-white">Discovered Hardware</h3>
-                            <button @click="discoverDevices" class="text-gray-400 hover:text-white" title="Scan for Hardware">
-                                <i class="fas fa-sync-alt"></i>
+                            <button @click="discoverDevices" :disabled="querying" class="text-gray-400 hover:text-white disabled:opacity-50" title="Scan for Hardware">
+                                <i class="fas fa-sync-alt" :class="querying ? 'fa-spin' : ''"></i>
                             </button>
                         </div>
                         <div class="space-y-4">
@@ -613,6 +624,7 @@
                 const building = ref(false);
                 const flashing = ref(false);
                 const updating = ref(false);
+                const querying = ref(false);
                 const buildLogs = ref("");
                 const currentTaskId = ref(null);
                 const taskCancelled = ref(false);
@@ -621,6 +633,8 @@
                 const error = ref(null);
                 const mainsailUrl = window.location.protocol + '//' + window.location.hostname;
                 const showRawSymbolNames = ref(localStorage.getItem('kf_show_raw_symbols') === 'true');
+                const showOptionalFeatures = ref(localStorage.getItem('kf_show_optional') === 'true');
+                const isKlipperKconfiglib = ref(true);
 
                 // Modal State
                 const modal = ref({
@@ -677,6 +691,10 @@
                 watch(selectedProfile, (p) => localStorage.setItem('kf_profile', p));
                 watch(modifiedValues, (m) => localStorage.setItem('kf_modified', JSON.stringify(m)), { deep: true });
                 watch(showRawSymbolNames, (v) => localStorage.setItem('kf_show_raw_symbols', v));
+                watch(showOptionalFeatures, (v) => {
+                    localStorage.setItem('kf_show_optional', v);
+                    fetchTree(selectedProfile.value);
+                });
 
                 const fetchTree = async (profile = '') => {
                     loading.value = true;
@@ -686,7 +704,11 @@
                         const res = await fetch('/config/tree', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ profile: profile || selectedProfile.value, values })
+                            body: JSON.stringify({ 
+                                profile: profile || selectedProfile.value, 
+                                values,
+                                show_optional: showOptionalFeatures.value
+                            })
                         });
                         if (!res.ok) {
                             const data = await res.json();
@@ -707,9 +729,31 @@
                     profiles.value = data.profiles;
                 };
 
-                const fetchFleet = async () => {
-                    const res = await fetch('/fleet');
-                    fleet.value = await res.json();
+                const fetchFleet = async (fast = true) => {
+                    querying.value = true;
+                    try {
+                        // Only do the "fast" load if requested and we don't have data or it's a manual refresh
+                        if (fast && fleet.value.length === 0) {
+                            const fastRes = await fetch('/fleet?fast=true');
+                            fleet.value = await fastRes.json();
+                        }
+
+                        // Then, get the full status (this may be slow due to CAN discovery)
+                        const res = await fetch('/fleet');
+                        fleet.value = await res.json();
+                    } catch (e) {
+                        console.error("Failed to fetch fleet", e);
+                    } finally {
+                        querying.value = false;
+                    }
+                };
+
+                let lastFleetFetch = 0;
+                const fetchFleetThrottled = async () => {
+                    const now = Date.now();
+                    if (now - lastFleetFetch < 2000) return; // 2 second throttle
+                    lastFleetFetch = now;
+                    await fetchFleet(false);
                 };
 
                 const fetchServices = async () => {
@@ -718,6 +762,16 @@
                         services.value = await res.json();
                     } catch (e) {
                         console.error("Failed to fetch services", e);
+                    }
+                };
+
+                const fetchSystemStatus = async () => {
+                    try {
+                        const res = await fetch('/api/status');
+                        const data = await res.json();
+                        isKlipperKconfiglib.value = data.is_klipper_kconfiglib;
+                    } catch (e) {
+                        console.error("Failed to fetch system status", e);
                     }
                 };
 
@@ -734,8 +788,15 @@
                 };
 
                 const discoverDevices = async () => {
-                    const res = await fetch('/devices/discover');
-                    devices.value = await res.json();
+                    querying.value = true;
+                    try {
+                        const res = await fetch('/devices/discover');
+                        devices.value = await res.json();
+                    } catch (e) {
+                        console.error("Failed to discover devices", e);
+                    } finally {
+                        querying.value = false;
+                    }
                 };
 
                 let updateTimeout = null;
@@ -888,7 +949,7 @@
                                 lastLogIndex = task.logs.length;
                                 scrollToBottom();
                                 // Refresh fleet status when new logs arrive to show real-time status changes
-                                fetchFleet();
+                                fetchFleetThrottled();
                             }
                             
                             if (task.completed) break;
@@ -948,7 +1009,7 @@
                             buildLogs.value += chunk;
                             scrollToBottom();
                             // Refresh fleet status to show real-time status changes
-                            fetchFleet();
+                            fetchFleetThrottled();
                         }
                     } catch (e) {
                         buildLogs.value += `!!! Error: ${e.message}\n`;
@@ -1094,7 +1155,7 @@
                             buildLogs.value += chunk;
                             scrollToBottom();
                             // Refresh fleet status to show real-time status changes
-                            fetchFleet();
+                            fetchFleetThrottled();
                         }
                     } catch (e) {
                         buildLogs.value += `!!! Error: ${e.message}\n`;
@@ -1110,6 +1171,10 @@
                     if (status === 'service') return 'text-blue-500';
                     if (status === 'dfu') return 'text-green-500';
                     if (status === 'inactive') return 'text-gray-500';
+                    if (status === 'querying') return 'text-orange-500';
+                    if (status === 'bus_busy') return 'text-purple-400';
+                    if (status === 'flashing') return 'text-orange-400';
+                    if (status === 'failed') return 'text-red-500';
                     return 'text-red-500';
                 };
 
@@ -1118,6 +1183,10 @@
                     if (status === 'service') return 'In Service';
                     if (status === 'dfu') return 'Ready';
                     if (status === 'inactive') return 'Inactive';
+                    if (status === 'querying') return 'Querying...';
+                    if (status === 'bus_busy') return 'Bus Busy';
+                    if (status === 'flashing') return 'Flashing...';
+                    if (status === 'failed') return 'Failed';
                     return status || 'offline';
                 };
 
@@ -1280,6 +1349,7 @@
                     fetchFleet();
                     fetchServices();
                     discoverDevices();
+                    fetchSystemStatus();
                     
                     // Refresh fleet status every 30 seconds
                     setInterval(() => {
@@ -1301,14 +1371,14 @@
                 };
 
                 return { 
-                    view, configTree, profiles, fleet, selectedProfile, loading, building, flashing, updating,
+                    view, configTree, profiles, fleet, selectedProfile, loading, building, flashing, updating, querying,
                     buildLogs, updateValue, saveProfile, saveProfileAs, newProfile, deleteProfile, loadProfile, createMissingProfile, startBuild, runBatch, selfUpdate,
                     devices, selectedDevice, discoverDevices, startFlash, quickFlash, quickBuild, quickFlashOnly, buildAndDownload, rebootDevice, statusColor, formatStatus,
                     addDeviceToFleet, attachToFleet, updateFleetDevice, removeDeviceFromFleet, error, modifiedValues, formatNotes,
                     mainsailUrl,
                     modal, showAlert, showConfirm, showPrompt, closeModal, testMagicBaud,
                     services, manageServices, cancelTask, currentTaskId,
-                    showRawSymbolNames
+                    showRawSymbolNames, showOptionalFeatures, isKlipperKconfiglib
                 };
             }
         }).mount('#app');
