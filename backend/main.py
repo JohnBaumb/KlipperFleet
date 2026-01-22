@@ -852,8 +852,21 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             yield await manage_klipper_services("stop")
             services_stopped = True
 
+            # get the interface type for the requested device
+            # Query the fleet to determine the interface for this device (default to can0)
+            interface = "can0"
+            if req.method == "can":
+                try:
+                    fleet = fleet_mgr.get_fleet()
+                    for d in fleet:
+                        if d.get("id") == req.device_id:
+                            interface = d.get("interface", interface)
+                            break
+                except Exception:
+                    pass
+
             # 1. Check current status
-            status: str = await flash_mgr.check_device_status(req.device_id, req.method, dfu_id=req.dfu_id)
+            status: str = await flash_mgr.check_device_status(req.device_id, req.method, dfu_id=req.dfu_id, interface=interface)
             task_store.update_device_status(task_id, req.device_id, status)
             
             # 2. Reboot if in service
@@ -943,7 +956,7 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                         if task_store.is_cancelled(task_id): return
                         yield log
                 elif actual_method == "can":
-                    async for log in flash_mgr.flash_can(target_id, firmware_path):
+                    async for log in flash_mgr.flash_can(target_id, firmware_path, interface=interface):
                         if task_store.is_cancelled(task_id): return
                         yield log
                 elif actual_method == "dfu":
