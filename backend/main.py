@@ -849,6 +849,10 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             yield await manage_klipper_services("stop")
             services_stopped = True
 
+            # Snapshot current serial devices BEFORE reboot (for diff-based detection)
+            initial_serials: List[str] = [d['id'] for d in await flash_mgr.discover_serial_devices(skip_moonraker=True)]
+            new_serial_device: Optional[str] = None
+
             # 1. Check current status
             status: str = await flash_mgr.check_device_status(req.device_id, req.method, dfu_id=req.dfu_id)
             task_store.update_device_status(task_id, req.device_id, status)
@@ -886,17 +890,41 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                 
                 yield ">>> Waiting for device to enter bootloader mode...\n"
                 await asyncio.sleep(2) # Initial wait for USB bus to settle
-                # Active wait for DFU device (up to 15s)
-                for _ in range(15):
+                
+                # Active wait for bootloader (up to 30s) - check both DFU and new serial devices
+                for _ in range(30):
                     if task_store.is_cancelled(task_id): return
                     await asyncio.sleep(1)
+                    
                     # Check if DFU device appeared
                     dfu_devs = await flash_mgr.discover_dfu_devices()
                     resolved = await flash_mgr.resolve_dfu_id(req.device_id, known_dfu_id=req.dfu_id)
                     if any(d['id'] == resolved for d in dfu_devs):
-                        # Found it! Wait one more second to be absolutely sure descriptors are ready
                         await asyncio.sleep(1)
                         break
+                    
+                    # Check for NEW serial device (Katapult mode) using snapshot diff
+                    if req.method == "serial":
+                        current_serials: List[Dict[str, str]] = await flash_mgr.discover_serial_devices(skip_moonraker=True)
+                        current_ids: List[str] = [d['id'] for d in current_serials]
+                        
+                        # Look for a NEW serial device that wasn't there before
+                        for cid in current_ids:
+                            if cid not in initial_serials:
+                                new_serial_device = cid
+                                yield f">>> New serial device detected: {cid}\n"
+                                break
+                        if new_serial_device:
+                            break
+                        
+                        # Fallback: look for ANY Katapult/CanBoot device
+                        for d in current_serials:
+                            if "katapult" in d['id'].lower() or "canboot" in d['id'].lower():
+                                new_serial_device = d['id']
+                                yield f">>> Katapult device detected: {d['id']}\n"
+                                break
+                        if new_serial_device:
+                            break
 
             if task_store.is_cancelled(task_id): return
 
@@ -911,7 +939,7 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                 actual_method = "dfu"
                 yield f">>> Device detected in DFU mode. Switching to DFU flash method.\n"
             elif req.method in ["serial", "dfu"]:
-                # Check DFU status
+                # Check DFU status first
                 resolved_dfu_id: str = await flash_mgr.resolve_dfu_id(req.device_id, known_dfu_id=req.dfu_id)
                 dfu_devs: List[Dict[str, str]] = await flash_mgr.discover_dfu_devices()
                 is_in_dfu: bool = any(d['id'] == resolved_dfu_id for d in dfu_devs)
@@ -921,8 +949,13 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                     actual_method = "dfu"
                     if actual_method != req.method:
                         yield f">>> Device detected in DFU mode. Switching to DFU flash method.\n"
+                elif new_serial_device:
+                    # Use the new device we found via snapshot diff
+                    target_id = new_serial_device
+                    actual_method = "serial"
+                    yield f">>> Using detected Katapult device: {target_id}\n"
                 else:
-                    # Check Serial status
+                    # Fallback to resolve_serial_id for cases where device ID didn't change
                     resolved_serial_id: str = await flash_mgr.resolve_serial_id(req.device_id)
                     if os.path.exists(resolved_serial_id):
                         target_id: str = resolved_serial_id
