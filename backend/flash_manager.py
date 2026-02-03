@@ -269,9 +269,44 @@ class FlashManager:
         except Exception as e:
             print(f"Error ensuring CAN up: {e}")
 
+    async def list_can_interfaces(self) -> List[str]:
+        """Lists all CAN interfaces present in the system."""
+        try:
+            can_interfaces: List[str] = []
+            process: Process = await asyncio.create_subprocess_exec(
+                "ip", "link", "show", "type", "can",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, _ = await process.communicate()
+            for line in stdout.decode().splitlines():
+                if ": " in line:
+                    iface: str = line.split(":")[1].strip()
+                    can_interfaces.append(iface)
+            return can_interfaces
+        except Exception as e:
+            print(f"Error listing CAN interfaces: {e}")
+            return []
+
     async def discover_can_devices(self, skip_moonraker: bool = False, force: bool = False) -> List[Dict[str, str]]:
+        """List canbus devices present in the system, and collect all the devices on each bus"""
+        try:
+            # use the ip tool to get each can interface
+            can_interfaces: List[str] = await self.list_can_interfaces()
+            devices: List[Dict[str, str]] = []
+            for iface in can_interfaces:
+                devices_on_iface: List[Dict[str, str]] = await self.discover_can_devices_with_interface(skip_moonraker=skip_moonraker, force=force, interface=iface)
+                for dev in devices_on_iface:
+                    devices.append(dev)
+                skip_moonraker = True # Only query Moonraker once for the first interface if at all
+            return devices
+        except Exception as e:
+            print(f"Error discovering CAN devices: {e}")
+            return []
+
+    async def discover_can_devices_with_interface(self, skip_moonraker: bool = False, force: bool = False, interface: str = "can0") -> List[Dict[str, str]]:
         """Discovers CAN devices using Klipper's canbus_query.py, Katapult's flashtool.py, and Moonraker API in parallel."""
-        await self.ensure_canbus_up()
+        await self.ensure_canbus_up(interface=interface)
         
         now: float = asyncio.get_event_loop().time()
         if not force and (now - self._can_cache_time) < self._can_cache_ttl_s:
@@ -288,7 +323,7 @@ class FlashManager:
                         klipper_python = "python3"
                     
                     process: Process = await asyncio.create_subprocess_exec(
-                        klipper_python, os.path.join(self.klipper_dir, "scripts", "canbus_query.py"), "can0",
+                        klipper_python, os.path.join(self.klipper_dir, "scripts", "canbus_query.py"), interface,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE
                     )
@@ -308,7 +343,7 @@ class FlashManager:
             async def run_katapult_query():
                 try:
                     process: Process = await asyncio.create_subprocess_exec(
-                        "python3", os.path.join(self.katapult_dir, "scripts", "flashtool.py"), "-i", "can0", "-q",
+                        "python3", os.path.join(self.katapult_dir, "scripts", "flashtool.py"), "-i", interface, "-q",
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE
                     )
@@ -345,7 +380,8 @@ class FlashManager:
                     "id": uuid, 
                     "name": f"CAN Device ({uuid})", 
                     "application": app,
-                    "mode": mode
+                    "mode": mode,
+                    "interface": interface
                 }
 
             # 2. Klipper results
@@ -355,7 +391,8 @@ class FlashManager:
                         "id": uuid, 
                         "name": f"CAN Device ({uuid})", 
                         "application": app,
-                        "mode": "service"
+                        "mode": "service",
+                        "interface": interface
                     }
 
             # 3. Moonraker results (name enrichment and fallback)
@@ -375,7 +412,8 @@ class FlashManager:
                                 "id": identifier,
                                 "name": section_name,
                                 "application": "Klipper (Configured)" if info.get("active") else "Klipper (Offline)",
-                                "mode": mode
+                                "mode": mode,
+                                "interface": interface
                             }
                         
                         # Add stats if available
