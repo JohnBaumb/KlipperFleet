@@ -292,7 +292,8 @@ async def manage_klipper_services(action: str) -> str:
             proc: Process = await asyncio.create_subprocess_exec(*cmd)
             await proc.wait()
         
-        return f">>> Successfully {action}ed: {', '.join(target_services)}\n"
+        past_tense_action = f"{action}ped" if action == "stop" else f"{action}ed"
+        return f">>> Successfully {past_tense_action}: {', '.join(target_services)}\n"
     except Exception as e:
         return f">>> Error managing services: {str(e)}\n"
 
