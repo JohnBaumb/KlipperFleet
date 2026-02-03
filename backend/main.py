@@ -649,7 +649,10 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                                     if task_store.is_cancelled(task_id): return
                                     task_store.add_log(task_id, log)
                             elif dev['method'] == "can":
-                                async for log in flash_mgr.flash_can(dev['id'], firmware_path, dev.get('interface', 'can0')):
+                                interface = dev.get('interface', 'can0')
+                                if not await flash_mgr.is_interface_up(interface):
+                                    raise IOError(f"CAN interface ({interface}) is DOWN. Cannot flash device.")
+                                async for log in flash_mgr.flash_can(dev['id'], firmware_path, interface):
                                     if task_store.is_cancelled(task_id): return
                                     task_store.add_log(task_id, log)
                             elif dev['method'] == "dfu":
