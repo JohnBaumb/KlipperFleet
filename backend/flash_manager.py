@@ -2,7 +2,7 @@ import os
 import asyncio
 import glob
 import httpx
-from typing import List, Dict, AsyncGenerator, Optional
+from typing import List, Dict, AsyncGenerator, Optional, Any
 from asyncio.subprocess import Process
 
 class FlashManager:
@@ -241,6 +241,66 @@ class FlashManager:
         except Exception as e:
             print(f"Error querying Moonraker: {e}")
         return mcus
+
+    async def get_mcu_versions(self) -> Dict[str, Dict[str, Any]]:
+        """Queries Moonraker for MCU version information."""
+        versions: Dict[str, Dict[str, Any]] = {}
+        try:
+            async with httpx.AsyncClient() as client:
+                # Get list of all MCU objects
+                list_response: httpx.Response = await client.get("http://127.0.0.1:7125/printer/objects/list", timeout=2.0)
+                if list_response.status_code != 200:
+                    return versions
+                    
+                all_objects = list_response.json().get("result", {}).get("objects", [])
+                mcu_objects = [obj for obj in all_objects if obj.startswith("mcu")]
+                
+                if not mcu_objects:
+                    return versions
+                
+                # Query all MCU objects for version info
+                query_url = f"http://127.0.0.1:7125/printer/objects/query?{'&'.join(mcu_objects)}"
+                mcu_response: httpx.Response = await client.get(query_url, timeout=2.0)
+                if mcu_response.status_code != 200:
+                    return versions
+                    
+                mcu_data = mcu_response.json().get("result", {}).get("status", {})
+                
+                # Also get configfile to map MCU names to identifiers
+                config_response: httpx.Response = await client.get("http://127.0.0.1:7125/printer/objects/query?configfile", timeout=2.0)
+                config = {}
+                if config_response.status_code == 200:
+                    config = config_response.json().get("result", {}).get("status", {}).get("configfile", {}).get("config", {})
+                
+                for mcu_name, mcu_info in mcu_data.items():
+                    version = mcu_info.get("mcu_version", "unknown")
+                    
+                    # Find the identifier (canbus_uuid or serial) for this MCU
+                    identifier = None
+                    config_section = config.get(mcu_name, {})
+                    if "canbus_uuid" in config_section:
+                        identifier = config_section["canbus_uuid"].lower().strip()
+                    elif "serial" in config_section:
+                        identifier = config_section["serial"].strip()
+                    
+                    if identifier:
+                        versions[identifier] = {
+                            "name": mcu_name,
+                            "version": version,
+                            "mcu_constants": mcu_info.get("mcu_constants", {})
+                        }
+                    
+                    # Also store by name for easy lookup
+                    versions[mcu_name] = {
+                        "name": mcu_name,
+                        "version": version,
+                        "identifier": identifier,
+                        "mcu_constants": mcu_info.get("mcu_constants", {})
+                    }
+                    
+        except Exception as e:
+            print(f"Error querying MCU versions: {e}")
+        return versions
 
     async def trigger_firmware_restart(self) -> None:
         """Sends a FIRMWARE_RESTART command to Klipper via Moonraker."""
@@ -744,7 +804,7 @@ print("Jump command sent to UUID {device_id}")
                 # but usually serial devices jump to app after flash or timeout.
                 yield f">>> Serial device {device_id} will return to service after flash or timeout.\n"
 
-    async def reboot_to_katapult(self, device_id: str, method: str = "can", interface: str = "can0", is_bridge: bool = False) -> AsyncGenerator[str, None]:
+    async def reboot_to_katapult(self, device_id: str, method: str = "can", interface: str = "can0", is_bridge: bool = False, baudrate: int = 250000) -> AsyncGenerator[str, None]:
         """Sends a reboot command to a device to enter Katapult."""
         yield f">>> Requesting reboot to Katapult for {device_id}...\n"
         method = method.lower()
@@ -790,6 +850,7 @@ print("Jump command sent to UUID {device_id}")
             cmd: List[str] = [
                 "python3", os.path.join(self.katapult_dir, "scripts", "flashtool.py"),
                 "-d", device_id,
+                "-b", str(baudrate),
                 "-r"
             ]
             
@@ -831,13 +892,14 @@ print("Jump command sent to UUID {device_id}")
             yield f">>> Error sending 1200bps magic baud: {str(e)}\n"
             yield ">>> Please manually enter DFU mode (BOOT0 + RESET) if the device does not appear.\n"
 
-    async def flash_serial(self, device_id: str, firmware_path: str) -> AsyncGenerator[str, None]:
+    async def flash_serial(self, device_id: str, firmware_path: str, baudrate: int = 250000) -> AsyncGenerator[str, None]:
         """Flashes a device via Serial using Katapult."""
-        yield f">>> Flashing {firmware_path} to {device_id} via Serial...\n"
+        yield f">>> Flashing {firmware_path} to {device_id} via Serial (baud {baudrate})...\n"
         cmd: List[str] = [
             "python3", os.path.join(self.katapult_dir, "scripts", "flashtool.py"),
             "-f", firmware_path,
-            "-d", device_id
+            "-d", device_id,
+            "-b", str(baudrate)
         ]
         async for line in self._run_flash_command(cmd):
             yield line

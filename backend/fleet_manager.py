@@ -47,3 +47,26 @@ class FleetManager:
         fleet = [d for d in fleet if d['id'] != device_id]
         with open(self.fleet_file, 'w') as f:
             json.dump(fleet, f, indent=4)
+
+    def update_device_version(self, device_id: str, version_info: Dict[str, Any]) -> None:
+        """Updates the version information for a device after flashing."""
+        import time
+        fleet: List[Dict[str, Any]] = self.get_fleet()
+        for d in fleet:
+            if d['id'] == device_id:
+                d['last_flashed'] = time.strftime("%Y-%m-%d %H:%M:%S")
+                d['flashed_version'] = version_info.get('version', 'unknown')
+                d['flashed_commit'] = version_info.get('commit', 'unknown')
+                break
+        with open(self.fleet_file, 'w') as f:
+            json.dump(fleet, f, indent=4)
+
+    def update_device_live_version(self, device_id: str, live_version: str) -> None:
+        """Updates the live running version for a device (from Moonraker query)."""
+        fleet: List[Dict[str, Any]] = self.get_fleet()
+        for d in fleet:
+            if d['id'] == device_id:
+                d['live_version'] = live_version
+                break
+        with open(self.fleet_file, 'w') as f:
+            json.dump(fleet, f, indent=4)

@@ -125,24 +125,30 @@
                 </div>
 
                 <!-- Dashboard View -->
-                <div v-if="view === 'dashboard'" class="flex-1 flex flex-col min-h-0 space-y-6">
-                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 flex-none overflow-y-auto max-h-[60vh] pr-2">
+                <div v-if="view === 'dashboard'" class="flex-1 flex flex-col space-y-6" :class="expandLogs ? 'overflow-y-auto' : 'min-h-0'">
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 flex-none pr-2" :class="expandLogs ? '' : 'overflow-y-auto max-h-[60vh]'">
                         <div v-for="dev in fleet" :key="dev.id" class="mainsail-card rounded-lg p-6">
                             <div class="flex justify-between items-start mb-4">
                                 <div class="flex-1 min-w-0 mr-2">
                                     <h3 class="text-lg font-bold text-white truncate" :title="dev.name">{{ dev.name }}</h3>
-                                    <div class="flex items-center space-x-2">
+                                    <div class="flex items-center space-x-2 h-4">
                                         <span class="flex items-center text-[10px] uppercase font-bold" :class="statusColor(dev.status)">
                                             <i class="fas fa-circle text-[6px] mr-1"></i> {{ formatStatus(dev.status) }}
                                         </span>
                                         <button v-if="dev.method === 'can' || dev.method === 'serial'" 
                                                 @click="rebootDevice(dev.id, (dev.status === 'ready' || dev.status === 'dfu') ? 'regular' : 'katapult', dev.method)" 
                                                 :disabled="flashing"
-                                                class="transition-colors"
+                                                class="transition-colors flex items-center justify-center w-4 h-4"
                                                 :class="(dev.status === 'ready' || dev.status === 'dfu') ? 'text-blue-400 hover:text-blue-300' : 'text-gray-500 hover:text-blue-400'"
                                                 :title="(dev.status === 'ready' || dev.status === 'dfu') ? 'Restart to Firmware' : (dev.method === 'serial' ? ('Reboot to DFU' + (dev.status === 'service' ? ' (stops services, device disconnects briefly)' : '')) : 'Reboot to Katapult')">
                                             <i class="fas fa-power-off text-[8px]"></i>
                                         </button>
+                                    </div>
+                                    <div v-if="deviceVersions[dev.id] && (deviceVersions[dev.id].live_version || deviceVersions[dev.id].flashed_version)" 
+                                         class="text-[10px] font-mono mt-0.5" 
+                                         :class="versionColor(dev.id)"
+                                         :title="versionTitle(dev.id)">
+                                        {{ deviceVersions[dev.id].live_version || deviceVersions[dev.id].flashed_version }}
                                     </div>
                                 </div>
                                 <span class="px-2 py-1 rounded text-[10px] font-bold uppercase" :class="{'bg-purple-900 text-purple-100': dev.method === 'can' && dev.status !== 'dfu', 'bg-blue-900 text-blue-100': dev.method === 'serial' && dev.status !== 'dfu', 'bg-orange-900 text-orange-100': dev.method === 'dfu' || dev.status === 'dfu', 'bg-green-900 text-green-100': dev.method === 'linux'}">
@@ -179,16 +185,24 @@
                     </div>
                     
                     <!-- Build Logs (Always visible on dashboard) -->
-                    <div class="mainsail-card rounded-lg overflow-hidden flex-1 flex flex-col min-h-[200px]">
+                    <div class="mainsail-card rounded-lg overflow-hidden flex flex-col" :class="expandLogs ? (expandLogsHeight === 'full' ? 'h-[calc(100vh-300px)] flex-none' : 'h-[800px] flex-none') : 'min-h-[200px] flex-1'">
                         <div class="bg-gray-800 px-4 py-2 text-xs font-bold flex justify-between items-center">
                             <span>BUILD & FLASH LOGS</span>
                             <div class="flex items-center space-x-4">
+                                <label class="flex items-center space-x-1 text-gray-400 cursor-pointer">
+                                    <input type="checkbox" v-model="expandLogs" class="form-checkbox h-3 w-3 text-blue-500 rounded">
+                                    <span>Expand</span>
+                                </label>
+                                <select v-if="expandLogs" v-model="expandLogsHeight" class="bg-gray-700 text-gray-300 text-xs rounded px-1 py-0.5 border border-gray-600">
+                                    <option value="800px">800px</option>
+                                    <option value="full">Fit Browser</option>
+                                </select>
                                 <button v-if="currentTaskId" @click="cancelTask" class="text-red-500 hover:text-red-400 font-bold">Cancel</button>
                                 <button @click="buildLogs = ''" class="text-gray-500 hover:text-white">Clear</button>
                             </div>
                         </div>
                         <div class="p-4 font-mono text-xs text-green-400 flex-1 overflow-y-auto bg-black whitespace-pre-wrap" id="log-container">
-                            {{ buildLogs }}
+                            <span v-html="formattedLogs"></span>
                             <div v-if="building || flashing" class="inline-block animate-pulse">_</div>
                         </div>
                     </div>
@@ -411,15 +425,31 @@
                                             <option value="dfu">DFU</option>
                                             <option value="linux">Linux</option>
                                         </select>
+                                        <!-- Baudrate selector for serial devices -->
+                                        <select v-if="dev.method === 'serial'" v-model.number="dev.baudrate" @change="updateFleetDevice(dev)" 
+                                                class="mainsail-input text-[10px] p-1 rounded bg-gray-900 border-gray-700 text-gray-400 font-bold"
+                                                title="Serial baudrate for Katapult flashtool.py">
+                                            <option :value="115200">115200</option>
+                                            <option :value="230400">230400</option>
+                                            <option :value="250000">250000</option>
+                                            <option :value="500000">500000</option>
+                                            <option :value="1000000">1000000</option>
+                                        </select>
                                     </div>
-                                    <div class="mt-3 flex items-center space-x-4">
-                                        <label class="flex items-center space-x-2 cursor-pointer group">
-                                            <input type="checkbox" v-model="dev.is_katapult" @change="updateFleetDevice(dev)" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500">
-                                            <span class="text-[10px] text-gray-400 group-hover:text-gray-200 uppercase font-bold">Katapult</span>
-                                        </label>
-                                        <label class="flex items-center space-x-2 cursor-pointer group">
-                                            <input type="checkbox" v-model="dev.is_bridge" @change="updateFleetDevice(dev)" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500">
-                                            <span class="text-[10px] text-gray-400 group-hover:text-gray-200 uppercase font-bold">CAN Bridge</span>
+                                    <div class="mt-3 flex items-center justify-between">
+                                        <div class="flex items-center space-x-4">
+                                            <label class="flex items-center space-x-2 cursor-pointer group">
+                                                <input type="checkbox" v-model="dev.is_katapult" @change="updateFleetDevice(dev)" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500">
+                                                <span class="text-[10px] text-gray-400 group-hover:text-gray-200 uppercase font-bold">Katapult</span>
+                                            </label>
+                                            <label class="flex items-center space-x-2 cursor-pointer group">
+                                                <input type="checkbox" v-model="dev.is_bridge" @change="updateFleetDevice(dev)" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500">
+                                                <span class="text-[10px] text-gray-400 group-hover:text-gray-200 uppercase font-bold">CAN Bridge</span>
+                                            </label>
+                                        </div>
+                                        <label class="flex items-center space-x-2 cursor-pointer group" title="This device will only be flashed when done individually. It will be skipped during Flash All, Build & Flash Ready, and Build & Flash All operations.">
+                                            <input type="checkbox" v-model="dev.exclude_from_batch" @change="updateFleetDevice(dev)" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-orange-600 focus:ring-orange-500">
+                                            <span class="text-[10px] text-orange-400 group-hover:text-orange-300 uppercase font-bold">Exclude from Flash All</span>
                                         </label>
                                     </div>
                                     <div class="mt-3">
@@ -557,7 +587,7 @@
     </div>
 
     <script>
-        const { createApp, ref, onMounted, watch } = Vue;
+        const { createApp, ref, computed, onMounted, watch } = Vue;
 
         const KconfigNode = {
             name: 'kconfig-node',
@@ -619,6 +649,8 @@
                 const fleet = ref([]);
                 const services = ref([]);
                 const devices = ref({ serial: [], can: [], dfu: [], linux: [] });
+                const deviceVersions = ref({});
+                const systemKlipperVersion = ref(null);
                 const selectedProfile = ref(localStorage.getItem('kf_profile') || '');
                 const loading = ref(false);
                 const building = ref(false);
@@ -628,8 +660,63 @@
                 const buildLogs = ref("");
                 const currentTaskId = ref(null);
                 const taskCancelled = ref(false);
+                
+                // Computed property to parse color markers into HTML
+                const formattedLogs = computed(() => {
+                    // First, escape HTML entities to prevent XSS
+                    let text = buildLogs.value
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;');
+                    
+                    // Parse explicit color markers: [COLOR:GREEN]text[/COLOR] -> <span class="...">text</span>
+                    text = text.replace(/\[COLOR:GREEN\](.*?)\[\/COLOR\]/g, '<span class="text-green-400">$1</span>');
+                    text = text.replace(/\[COLOR:YELLOW\](.*?)\[\/COLOR\]/g, '<span class="text-yellow-400">$1</span>');
+                    text = text.replace(/\[COLOR:RED\](.*?)\[\/COLOR\]/g, '<span class="text-red-400">$1</span>');
+                    
+                    // Colorize lines based on prefix patterns
+                    // Split into lines, colorize, rejoin
+                    const lines = text.split('\n');
+                    const colorizedLines = lines.map(line => {
+                        // Already colored (contains span) - skip
+                        if (line.includes('<span class="text-')) return line;
+                        
+                        // Error lines (red) - "!!!" prefix
+                        if (line.trim().startsWith('!!!')) {
+                            return `<span class="text-red-400">${line}</span>`;
+                        }
+                        // Success messages (bright green)
+                        if (line.includes('successful') || line.includes('SUCCESS') || line.includes('Complete') ||
+                            line.includes('Successfully') || line.includes('COMPLETED')) {
+                            return `<span class="text-green-400">${line}</span>`;
+                        }
+                        // Warning/skip messages (yellow)
+                        if (line.includes('Skipping') || line.includes('SKIPPED') || line.includes('waiting')) {
+                            return `<span class="text-yellow-400">${line}</span>`;
+                        }
+                        // Section headers (cyan/blue)
+                        if (line.includes('=====') || line.includes('[SUMMARY]') || line.includes('BUILD RESULTS') || line.includes('FLASH RESULTS')) {
+                            return `<span class="text-cyan-400">${line}</span>`;
+                        }
+                        // Phase markers (blue) - ">>> BATCH" or "<<< BATCH" 
+                        if (line.includes('BATCH BUILD') || line.includes('BATCH FLASH') || line.includes('ALL BATCH')) {
+                            return `<span class="text-blue-400">${line}</span>`;
+                        }
+                        // Info lines (gray/dim) - ">>>" prefix
+                        if (line.trim().startsWith('&gt;&gt;&gt;')) {
+                            return `<span class="text-gray-400">${line}</span>`;
+                        }
+                        // Default (green) - build output
+                        return line;
+                    });
+                    
+                    return colorizedLines.join('\n');
+                });
+                
                 const modifiedValues = ref(JSON.parse(localStorage.getItem('kf_modified') || '{}'));
                 const selectedDevice = ref({ id: '', method: '' });
+                const expandLogs = ref(localStorage.getItem('kf_expand_logs') === 'true');
+                const expandLogsHeight = ref(localStorage.getItem('kf_expand_logs_height') || '800px');
                 const error = ref(null);
                 const mainsailUrl = window.location.protocol + '//' + window.location.hostname;
                 const showRawSymbolNames = ref(localStorage.getItem('kf_show_raw_symbols') === 'true');
@@ -741,11 +828,60 @@
                         // Then, get the full status (this may be slow due to CAN discovery)
                         const res = await fetch('/fleet');
                         fleet.value = await res.json();
+                        
+                        // Fetch version info for devices
+                        await fetchVersions();
                     } catch (e) {
                         console.error("Failed to fetch fleet", e);
                     } finally {
                         querying.value = false;
                     }
+                };
+
+                const fetchVersions = async () => {
+                    try {
+                        const res = await fetch('/fleet/versions');
+                        deviceVersions.value = await res.json();
+                    } catch (e) {
+                        console.error("Failed to fetch versions", e);
+                    }
+                };
+
+                const fetchKlipperVersion = async () => {
+                    try {
+                        const res = await fetch('/klipper/version');
+                        systemKlipperVersion.value = await res.json();
+                    } catch (e) {
+                        console.error("Failed to fetch Klipper version", e);
+                        systemKlipperVersion.value = null;
+                    }
+                };
+
+                const versionMatch = (deviceId) => {
+                    const info = deviceVersions.value[deviceId];
+                    const host = systemKlipperVersion.value;
+                    if (!info || !host) return true; // no data to compare
+                    if (!info.live_version || !host.version || host.version === 'unknown') return true;
+                    return info.live_version === host.version;
+                };
+
+                const versionColor = (deviceId) => {
+                    const info = deviceVersions.value[deviceId];
+                    const host = systemKlipperVersion.value;
+                    if (!info || !info.live_version || !host || !host.version || host.version === 'unknown') {
+                        return 'text-gray-500';
+                    }
+                    return versionMatch(deviceId) ? 'text-green-400' : 'text-orange-400';
+                };
+
+                const versionTitle = (deviceId) => {
+                    const info = deviceVersions.value[deviceId];
+                    const host = systemKlipperVersion.value;
+                    const parts = [];
+                    if (info?.live_version) parts.push(`Device: ${info.live_version}`);
+                    if (host?.version) parts.push(`System: ${host.version}`);
+                    if (info?.last_flashed) parts.push(`Flashed: ${info.last_flashed}`);
+                    return parts.join(' | ');
                 };
 
                 let lastFleetFetch = 0;
@@ -770,6 +906,7 @@
                         const res = await fetch('/api/status');
                         const data = await res.json();
                         isKlipperKconfiglib.value = data.is_klipper_kconfiglib;
+                        await fetchKlipperVersion();
                     } catch (e) {
                         console.error("Failed to fetch system status", e);
                     }
@@ -1200,12 +1337,14 @@
                         profile: '', 
                         method, 
                         interface: 'can0',
+                        baudrate: 250000,  // Default baudrate for serial (Katapult default)
                         notes: '',
                         is_katapult: dev.id.toLowerCase().includes('katapult') || dev.id.toLowerCase().includes('canboot'),
                         is_bridge: false,
                         dfu_id: method === 'dfu' ? dev.id : null,
                         magic_baud_tested: false,
-                        use_magic_baud: false
+                        use_magic_baud: false,
+                        exclude_from_batch: false
                     };
                     try {
                         const res = await fetch('/fleet/device', {
@@ -1362,6 +1501,14 @@
                     }, 10000);
                 });
 
+                // Watch expand settings and persist to localStorage
+                watch(expandLogs, (newVal) => {
+                    localStorage.setItem('kf_expand_logs', newVal.toString());
+                });
+                watch(expandLogsHeight, (newVal) => {
+                    localStorage.setItem('kf_expand_logs_height', newVal);
+                });
+
                 const formatNotes = (text) => {
                     if (!text) return '';
                     const urlRegex = /(https?:\/\/[^\s]+)/g;
@@ -1372,13 +1519,14 @@
 
                 return { 
                     view, configTree, profiles, fleet, selectedProfile, loading, building, flashing, updating, querying,
-                    buildLogs, updateValue, saveProfile, saveProfileAs, newProfile, deleteProfile, loadProfile, createMissingProfile, startBuild, runBatch, selfUpdate,
+                    buildLogs, formattedLogs, expandLogs, expandLogsHeight, updateValue, saveProfile, saveProfileAs, newProfile, deleteProfile, loadProfile, createMissingProfile, startBuild, runBatch, selfUpdate,
                     devices, selectedDevice, discoverDevices, startFlash, quickFlash, quickBuild, quickFlashOnly, buildAndDownload, rebootDevice, statusColor, formatStatus,
                     addDeviceToFleet, attachToFleet, updateFleetDevice, removeDeviceFromFleet, error, modifiedValues, formatNotes,
                     mainsailUrl,
                     modal, showAlert, showConfirm, showPrompt, closeModal, testMagicBaud,
                     services, manageServices, cancelTask, currentTaskId,
-                    showRawSymbolNames, showOptionalFeatures, isKlipperKconfiglib
+                    showRawSymbolNames, showOptionalFeatures, isKlipperKconfiglib,
+                    deviceVersions, systemKlipperVersion, versionMatch, versionColor, versionTitle
                 };
             }
         }).mount('#app');
