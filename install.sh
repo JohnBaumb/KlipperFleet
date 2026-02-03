@@ -24,6 +24,7 @@ else
     USER=$(whoami)
 fi
 USER_HOME=$(getent passwd $USER | cut -d: -f6)
+USER_GROUP=$(id -gn $USER)
 
 # Log for debugging automated installs
 LOG_FILE="/tmp/klipperfleet-install.log"
@@ -61,6 +62,10 @@ fi
 # Switch to the repo directory
 cd "${KF_PATH}"
 SRCDIR=$(pwd)
+
+# Fix ownership of the repository to ensure the user can access it
+echo "KlipperFleet: Fixing repository ownership..."
+chown -R $USER:$USER_GROUP "$KF_PATH"
 
 # Ensure all scripts are executable
 chmod +x *.sh

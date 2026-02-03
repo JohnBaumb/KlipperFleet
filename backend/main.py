@@ -26,7 +26,7 @@ except Exception:
     from flash_manager import FlashManager
     from fleet_manager import FleetManager
 
-app = FastAPI(title="KlipperFleet API")
+app = FastAPI(title="KlipperFleet API", version="1.1.0-alpha")
 
 # Configuration
 KLIPPER_DIR: str = os.path.abspath(os.path.expanduser(os.getenv("KLIPPER_DIR", "~/klipper")))
