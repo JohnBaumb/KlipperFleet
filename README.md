@@ -3,11 +3,13 @@
 > [!WARNING]
 > **ALPHA SOFTWARE**: KlipperFleet is currently in alpha. It has only been tested on specific (listed below) **CAN bus**, **STM32 Serial/DFU** devices, as well as **Linux Process**.
 >
-> **Non-Raspberry Pi, Kalico, and Fluidd Users**: Be advised these are unsupported at the moment, but on the roadmap for integration and testing later.
+> **Non-Raspberry Pi and Fluidd Users**: Be advised these are unsupported at the moment, but on the roadmap for integration and testing later.
+>
+> **Kalico Users**: Kalico is supported! KlipperFleet auto-detects Kalico when it's installed in `~/klipper` (the standard Kalico setup). No extra configuration needed.
 >
 > Contributions and [bug reports](https://github.com/JohnBaumb/KlipperFleet/issues) are highly appreciated!
 
-KlipperFleet is a "one-stop-shop" for managing Klipper firmware across your entire fleet of MCUs on a single printer. It provides a modern web interface (integrated into Mainsail) to configure, build, and flash firmware without ever touching the command line.
+KlipperFleet is a "one-stop-shop" for managing Klipper (and Kalico) firmware across your entire fleet of MCUs on a single printer. It provides a modern web interface (integrated into Mainsail) to configure, build, and flash firmware without ever touching the command line.
 
 ## Features
 
@@ -154,7 +156,6 @@ KlipperFleet is under active development. Here are some of the major features cu
   - **One-Click UI Updates**: Integration with Moonraker's update manager for updates directly from the KlipperFleet dashboard.
   - **Custom Modal System**: Replacing browser prompts with a native-feeling UI for a smoother experience.
 - **Ecosystem Expansion**: Eventual Additions.
-  - **Kalico Support**: Compatibility for Kalico firmware and configuration.
   - **Fluidd Integration**: Seamless integration and UI parity for Fluidd users.
 ## License
 GPLv3

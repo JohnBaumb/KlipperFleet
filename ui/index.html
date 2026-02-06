@@ -19,23 +19,35 @@
         ::-webkit-scrollbar-track { background: #121212; }
         ::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
         ::-webkit-scrollbar-thumb:hover { background: #444; }
+        /* Mobile sidebar overlay */
+        .sidebar-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 40; }
+        .sidebar-overlay.active { display: block; }
+        @media (max-width: 767px) {
+            .kconfig-item { margin-left: 0.5rem; }
+            .kconfig-menu { padding-left: 0.5rem; }
+            .sidebar-mobile { position: fixed; left: 0; top: 0; bottom: 0; z-index: 50; transform: translateX(-100%); transition: transform 0.25s ease-in-out; }
+            .sidebar-mobile.open { transform: translateX(0); }
+        }
     </style>
 </head>
 <body class="font-sans">
     <div id="app" class="flex h-screen overflow-hidden">
+        <!-- Mobile Sidebar Overlay -->
+        <div class="sidebar-overlay" :class="{ active: sidebarOpen }" @click="sidebarOpen = false"></div>
+
         <!-- Sidebar -->
-        <aside class="w-64 mainsail-card border-r border-gray-800 flex flex-col">
+        <aside class="w-64 mainsail-card border-r border-gray-800 flex flex-col sidebar-mobile md:!transform-none md:relative md:z-auto" :class="{ open: sidebarOpen }">
             <div class="p-6 border-b border-gray-800">
                 <h1 class="text-2xl font-bold text-blue-500"><i class="fas fa-ship mr-2"></i>KlipperFleet</h1>
             </div>
             <nav class="flex-1 p-4 space-y-2">
-                <button @click="view = 'dashboard'" :class="view === 'dashboard' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-800 hover:text-white'" class="w-full text-left p-3 rounded flex items-center transition-colors">
+                <button @click="view = 'dashboard'; sidebarOpen = false" :class="view === 'dashboard' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-800 hover:text-white'" class="w-full text-left p-3 rounded flex items-center transition-colors">
                     <i class="fas fa-tachometer-alt mr-3"></i> Dashboard
                 </button>
-                <button @click="view = 'configurator'" :class="view === 'configurator' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-800 hover:text-white'" class="w-full text-left p-3 rounded flex items-center transition-colors">
+                <button @click="view = 'configurator'; sidebarOpen = false" :class="view === 'configurator' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-800 hover:text-white'" class="w-full text-left p-3 rounded flex items-center transition-colors">
                     <i class="fas fa-cog mr-3"></i> Configurator
                 </button>
-                <button @click="view = 'fleet'" :class="view === 'fleet' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-800 hover:text-white'" class="w-full text-left p-3 rounded flex items-center transition-colors">
+                <button @click="view = 'fleet'; sidebarOpen = false" :class="view === 'fleet' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-800 hover:text-white'" class="w-full text-left p-3 rounded flex items-center transition-colors">
                     <i class="fas fa-microchip mr-3"></i> Fleet Manager
                 </button>
             </nav>
@@ -46,88 +58,89 @@
                 </button>
                 <div v-if="!isKlipperKconfiglib" class="p-2 bg-red-900/30 border border-red-800/50 rounded text-[9px] text-red-400 leading-tight">
                     <i class="fas fa-exclamation-triangle mr-1"></i>
-                    Using system kconfiglib. Please click Update to switch to Klipper's version for full compatibility.
+                    Using system kconfiglib. Please click Update to switch to {{ firmwareName }}'s version for full compatibility.
                 </div>
-                <div class="text-[10px] text-gray-500">v1.1.0-alpha</div>
+                <div class="text-[10px] text-gray-500">v1.1.1-alpha</div>
             </div>
         </aside>
 
         <!-- Main Content -->
         <main class="flex-1 flex flex-col overflow-hidden">
             <!-- Header -->
-            <header class="h-16 mainsail-card border-b border-gray-800 flex items-center justify-between px-8">
-                <div class="flex items-center space-x-4">
-                    <a :href="mainsailUrl" class="text-gray-400 hover:text-white flex items-center text-sm transition-colors mr-4 border-r border-gray-800 pr-4">
+            <header class="h-auto min-h-[3.5rem] md:h-16 mainsail-card border-b border-gray-800 flex flex-col md:flex-row md:items-center md:justify-between px-3 md:px-8 py-2 md:py-0">
+                <div class="flex items-center space-x-3 md:space-x-4">
+                    <button @click="sidebarOpen = !sidebarOpen" class="md:hidden text-gray-400 hover:text-white p-1">
+                        <i class="fas fa-bars text-lg"></i>
+                    </button>
+                    <a :href="mainsailUrl" class="hidden md:flex text-gray-400 hover:text-white items-center text-sm transition-colors mr-4 border-r border-gray-800 pr-4">
                         <i class="fas fa-arrow-left mr-2"></i> Return to Mainsail
                     </a>
-                    <h2 class="text-xl font-semibold capitalize">{{ view }}</h2>
+                    <h2 class="text-lg md:text-xl font-semibold capitalize">{{ view }}</h2>
+                    <span v-if="building || flashing" class="flex items-center text-orange-400 text-xs md:text-sm ml-auto md:ml-0">
+                        <i class="fas fa-circle-notch fa-spin mr-1 md:mr-2"></i> <span class="hidden sm:inline">Processing...</span>
+                    </span>
+                    <span v-if="querying && !building && !flashing" class="flex items-center text-blue-400 text-xs md:text-sm ml-auto md:ml-0">
+                        <i class="fas fa-search fa-spin mr-1 md:mr-2"></i> <span class="hidden sm:inline">Querying...</span>
+                    </span>
                 </div>
-                <div class="flex items-center space-x-4">
-                    <span v-if="building || flashing" class="flex items-center text-orange-400 text-sm">
-                        <i class="fas fa-circle-notch fa-spin mr-2"></i> Processing...
-                    </span>
-                    <span v-if="querying && !building && !flashing" class="flex items-center text-blue-400 text-sm">
-                        <i class="fas fa-search fa-spin mr-2"></i> Querying Bus...
-                    </span>
-                    <div v-if="view === 'dashboard'" class="flex items-center space-x-2">
-                        <button @click="runBatch('build-all')" :disabled="building || flashing" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-[10px] font-bold disabled:opacity-50 uppercase">
-                            Build All
-                        </button>
-                        <button @click="runBatch('flash-all')" :disabled="building || flashing" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-[10px] font-bold disabled:opacity-50 uppercase">
-                            Flash All
-                        </button>
-                        <button @click="runBatch('build-flash-ready')" :disabled="building || flashing" class="bg-orange-600 hover:bg-orange-700 text-white px-3 py-1 rounded text-[10px] font-bold disabled:opacity-50 uppercase">
-                            Build & Flash Ready
-                        </button>
-                        <button @click="runBatch('build-flash-all')" :disabled="building || flashing" class="bg-red-700 hover:bg-red-800 text-white px-3 py-1 rounded text-[10px] font-bold disabled:opacity-50 uppercase">
-                            Build & Flash All
-                        </button>
-                    </div>
+                <div v-if="view === 'dashboard'" class="flex items-center space-x-1.5 md:space-x-2 mt-1.5 md:mt-0 overflow-x-auto pb-1 md:pb-0 -mx-1 px-1">
+                    <button @click="runBatch('build-all')" :disabled="building || flashing" class="bg-gray-700 hover:bg-gray-600 text-white px-2 md:px-3 py-1 rounded text-[9px] md:text-[10px] font-bold disabled:opacity-50 uppercase whitespace-nowrap flex-none">
+                        Build All
+                    </button>
+                    <button @click="runBatch('flash-all')" :disabled="building || flashing" class="bg-gray-700 hover:bg-gray-600 text-white px-2 md:px-3 py-1 rounded text-[9px] md:text-[10px] font-bold disabled:opacity-50 uppercase whitespace-nowrap flex-none">
+                        Flash All
+                    </button>
+                    <button @click="runBatch('build-flash-ready')" :disabled="building || flashing" class="bg-orange-600 hover:bg-orange-700 text-white px-2 md:px-3 py-1 rounded text-[9px] md:text-[10px] font-bold disabled:opacity-50 uppercase whitespace-nowrap flex-none">
+                        Build & Flash Ready
+                    </button>
+                    <button @click="runBatch('build-flash-all')" :disabled="building || flashing" class="bg-red-700 hover:bg-red-800 text-white px-2 md:px-3 py-1 rounded text-[9px] md:text-[10px] font-bold disabled:opacity-50 uppercase whitespace-nowrap flex-none">
+                        Build & Flash All
+                    </button>
                 </div>
             </header>
 
             <!-- Service Status Bar -->
-            <div class="bg-gray-900/50 border-b border-gray-800 px-8 py-2 flex items-center justify-between text-[10px] uppercase font-bold tracking-wider">
-                <div class="flex items-center space-x-6">
-                    <span class="text-gray-500">Services:</span>
-                    <div v-for="svc in services" :key="svc.name" class="flex items-center space-x-2">
+            <div class="bg-gray-900/50 border-b border-gray-800 px-3 md:px-8 py-2 flex flex-col sm:flex-row sm:items-center sm:justify-between text-[10px] uppercase font-bold tracking-wider gap-1.5 sm:gap-0">
+                <div class="flex items-center space-x-3 md:space-x-6 overflow-x-auto">
+                    <span class="text-gray-500 flex-none">Services:</span>
+                    <div v-for="svc in services" :key="svc.name" class="flex items-center space-x-2 flex-none">
                         <span :class="svc.active ? 'text-green-500' : 'text-red-500'">
                             <i class="fas fa-circle text-[6px] mr-1"></i>
                             {{ svc.name.replace('.service', '') }}
                         </span>
                     </div>
-                    <span v-if="services.length === 0" class="text-gray-600 italic">No services detected</span>
+                    <span v-if="services.length === 0" class="text-gray-600 italic flex-none">No services detected</span>
                 </div>
-                <div class="flex items-center space-x-4">
+                <div class="flex items-center space-x-3 md:space-x-4 flex-none">
                     <button @click="manageServices('start')" class="text-gray-400 hover:text-green-500 transition-colors flex items-center">
-                        <i class="fas fa-play mr-1"></i> Start All
+                        <i class="fas fa-play mr-1"></i> <span class="hidden sm:inline">Start All</span><span class="sm:hidden">Start</span>
                     </button>
                     <button @click="manageServices('stop')" class="text-gray-400 hover:text-red-500 transition-colors flex items-center">
-                        <i class="fas fa-stop mr-1"></i> Stop All
+                        <i class="fas fa-stop mr-1"></i> <span class="hidden sm:inline">Stop All</span><span class="sm:hidden">Stop</span>
                     </button>
                     <button @click="manageServices('restart')" class="text-gray-400 hover:text-blue-500 transition-colors flex items-center">
-                        <i class="fas fa-sync-alt mr-1"></i> Restart All
+                        <i class="fas fa-sync-alt mr-1"></i> <span class="hidden sm:inline">Restart All</span><span class="sm:hidden">Restart</span>
                     </button>
                 </div>
             </div>
 
             <!-- Content Area -->
-            <div class="flex-1 flex flex-col min-h-0 p-8">
+            <div class="flex-1 flex flex-col min-h-0 p-3 md:p-8">
                 
                 <!-- Alpha Warning -->
-                <div class="mb-6 bg-orange-900/20 border border-orange-500/30 rounded-lg p-4 flex items-center space-x-4 text-orange-200">
+                <div class="mb-4 md:mb-6 bg-orange-900/20 border border-orange-500/30 rounded-lg p-3 md:p-4 flex items-start md:items-center space-x-3 md:space-x-4 text-orange-200">
                     <i class="fas fa-vial text-xl"></i>
                     <div class="text-xs">
                         <p class="font-bold uppercase tracking-wider mb-1">Alpha Version</p>
-                        <p class="opacity-80">Tested on CAN, Linux, and STM32 DFU devices. Kalico/Fluidd are currently unsupported.</p>
+                        <p class="opacity-80">Tested on CAN, Linux, and STM32 DFU devices. Compatible with Klipper and Kalico. Fluidd is currently unsupported.</p>
                         <p class="opacity-80 mt-1">Hey you! <a href="https://github.com/JohnBaumb/KlipperFleet/issues" target="_blank" class="underline hover:text-orange-100 transition-colors">Bug reports</a> and <a href="https://github.com/JohnBaumb/KlipperFleet/discussions/2" target="_blank" class="underline hover:text-orange-100 transition-colors">Hardware Compatibility Issues / Success Stories</a> are welcome!</p>
                     </div>
                 </div>
 
                 <!-- Dashboard View -->
-                <div v-if="view === 'dashboard'" class="flex-1 flex flex-col space-y-6" :class="expandLogs ? 'overflow-y-auto' : 'min-h-0'">
-                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 flex-none pr-2" :class="expandLogs ? '' : 'overflow-y-auto max-h-[60vh]'">
-                        <div v-for="dev in fleet" :key="dev.id" class="mainsail-card rounded-lg p-6">
+                <div v-if="view === 'dashboard'" class="flex-1 flex flex-col space-y-4 md:space-y-6" :class="expandLogs ? 'overflow-y-auto' : 'min-h-0'">
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 md:gap-6 flex-none pr-0 md:pr-2" :class="expandLogs ? '' : 'overflow-y-auto max-h-[60vh]'">
+                        <div v-for="dev in fleet" :key="dev.id" class="mainsail-card rounded-lg p-4 md:p-6">
                             <div class="flex justify-between items-start mb-4">
                                 <div class="flex-1 min-w-0 mr-2">
                                     <h3 class="text-lg font-bold text-white truncate" :title="dev.name">{{ dev.name }}</h3>
@@ -185,7 +198,7 @@
                     </div>
                     
                     <!-- Build Logs (Always visible on dashboard) -->
-                    <div class="mainsail-card rounded-lg overflow-hidden flex flex-col" :class="expandLogs ? (expandLogsHeight === 'full' ? 'h-[calc(100vh-300px)] flex-none' : 'h-[800px] flex-none') : 'min-h-[200px] flex-1'">
+                    <div class="mainsail-card rounded-lg overflow-hidden flex flex-col" :class="expandLogs ? (expandLogsHeight === 'full' ? 'h-[calc(100vh-300px)] flex-none' : 'h-[500px] md:h-[800px] flex-none') : 'min-h-[150px] md:min-h-[200px] flex-1'">
                         <div class="bg-gray-800 px-4 py-2 text-xs font-bold flex justify-between items-center">
                             <span>BUILD & FLASH LOGS</span>
                             <div class="flex items-center space-x-4">
@@ -209,29 +222,31 @@
                 </div>
 
                 <!-- Configurator View -->
-                <div v-if="view === 'configurator'" class="flex-1 overflow-y-auto grid grid-cols-1 lg:grid-cols-4 gap-8 pr-2">
-                    <div class="lg:col-span-3 mainsail-card rounded-lg p-6">
-                        <div class="flex justify-between items-center mb-6">
-                            <div class="flex items-center space-x-2">
+                <div v-if="view === 'configurator'" class="flex-1 overflow-y-auto grid grid-cols-1 lg:grid-cols-4 gap-4 md:gap-8 pr-0 md:pr-2">
+                    <div class="lg:col-span-3 mainsail-card rounded-lg p-3 md:p-6">
+                        <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-4 md:mb-6 gap-3 sm:gap-0">
+                            <div class="flex flex-wrap items-center gap-2">
                                 <button @click="newProfile" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded text-sm font-bold flex items-center transition-colors" title="Start New Profile">
                                     <i class="fas fa-file-alt mr-2"></i> New
                                 </button>
-                                <div class="h-8 w-px bg-gray-800 mx-2"></div>
-                                <select v-model="selectedProfile" @change="loadProfile" class="mainsail-input p-2 rounded text-sm w-48">
+                                <div class="hidden sm:block h-8 w-px bg-gray-800"></div>
+                                <select v-model="selectedProfile" @change="loadProfile" class="mainsail-input p-2 rounded text-sm w-full sm:w-48">
                                     <option value="" disabled>-- Select Profile --</option>
                                     <option v-for="p in profiles" :key="p" :value="p">{{ p }}</option>
                                 </select>
-                                <button @click="saveProfile" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded text-sm font-bold flex items-center transition-colors">
-                                    <i class="fas fa-save mr-2"></i> Save
-                                </button>
-                                <button v-if="selectedProfile" @click="saveProfileAs" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded text-sm font-bold transition-colors" title="Save As...">
-                                    <i class="fas fa-copy"></i>
-                                </button>
-                                <button v-if="selectedProfile" @click="deleteProfile" class="bg-red-900/50 hover:bg-red-700 text-red-200 px-3 py-2 rounded text-sm font-bold transition-colors" title="Delete Profile">
-                                    <i class="fas fa-trash"></i>
-                                </button>
+                                <div class="flex items-center space-x-2">
+                                    <button @click="saveProfile" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded text-sm font-bold flex items-center transition-colors">
+                                        <i class="fas fa-save mr-2"></i> Save
+                                    </button>
+                                    <button v-if="selectedProfile" @click="saveProfileAs" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded text-sm font-bold transition-colors" title="Save As...">
+                                        <i class="fas fa-copy"></i>
+                                    </button>
+                                    <button v-if="selectedProfile" @click="deleteProfile" class="bg-red-900/50 hover:bg-red-700 text-red-200 px-3 py-2 rounded text-sm font-bold transition-colors" title="Delete Profile">
+                                        <i class="fas fa-trash"></i>
+                                    </button>
+                                </div>
                             </div>
-                            <button v-if="selectedProfile" @click="startBuild()" :disabled="building" class="mainsail-btn text-white px-4 py-2 rounded text-sm font-bold disabled:opacity-50">
+                            <button v-if="selectedProfile" @click="startBuild()" :disabled="building" class="mainsail-btn text-white px-4 py-2 rounded text-sm font-bold disabled:opacity-50 w-full sm:w-auto">
                                 <i class="fas fa-hammer mr-2"></i> Build
                             </button>
                         </div>
@@ -258,8 +273,8 @@
                         </div>
                     </div>
                     
-                    <div class="space-y-6">
-                        <div class="mainsail-card rounded-lg p-4">
+                    <div class="space-y-4 md:space-y-6">
+                        <div class="mainsail-card rounded-lg p-3 md:p-4">
                             <h3 class="font-bold mb-4 text-sm border-b border-gray-800 pb-2">PROFILE INFO</h3>
                             <div class="space-y-2 text-xs">
                                 <div class="flex justify-between"><span class="text-gray-500">Name:</span> <span>{{ selectedProfile || 'Unsaved' }}</span></div>
@@ -281,9 +296,9 @@
                 </div>
 
                 <!-- Fleet Manager View -->
-                <div v-if="view === 'fleet'" class="flex-1 overflow-y-auto grid grid-cols-1 lg:grid-cols-2 gap-8 pr-2">
-                    <div class="mainsail-card rounded-lg p-6">
-                        <div class="flex justify-between items-center mb-6">
+                <div v-if="view === 'fleet'" class="flex-1 overflow-y-auto grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-8 pr-0 md:pr-2">
+                    <div class="mainsail-card rounded-lg p-4 md:p-6">
+                        <div class="flex justify-between items-center mb-4 md:mb-6">
                             <h3 class="text-lg font-bold text-white">Discovered Hardware</h3>
                             <button @click="discoverDevices" :disabled="querying" class="text-gray-400 hover:text-white disabled:opacity-50" title="Scan for Hardware">
                                 <i class="fas fa-sync-alt" :class="querying ? 'fa-spin' : ''"></i>
@@ -394,8 +409,8 @@
                         </div>
                     </div>
 
-                    <div class="mainsail-card rounded-lg p-6">
-                        <h3 class="text-lg font-bold mb-6 text-white">Registered Fleet</h3>
+                    <div class="mainsail-card rounded-lg p-4 md:p-6">
+                        <h3 class="text-lg font-bold mb-4 md:mb-6 text-white">Registered Fleet</h3>
                         <div class="space-y-4">
                             <div v-for="dev in fleet" :key="dev.id" class="relative group">
                                 <!-- Parent Device Entry -->
@@ -415,8 +430,8 @@
                                         </button>
                                     </div>
 
-                                    <div class="mt-4 flex items-center space-x-4">
-                                        <select v-model="dev.profile" @change="updateFleetDevice(dev)" class="mainsail-input text-xs p-1 rounded flex-1">
+                                    <div class="mt-4 flex flex-wrap items-center gap-2">
+                                        <select v-model="dev.profile" @change="updateFleetDevice(dev)" class="mainsail-input text-xs p-1 rounded flex-1 min-w-[120px]">
                                             <option value="">-- Assign Profile --</option>
                                             <option v-for="p in profiles" :key="p" :value="p">{{ p }}</option>
                                         </select>
@@ -442,7 +457,7 @@
                                                title="CAN interface (e.g. can0, can1)"
                                                placeholder="can0">
                                     </div>
-                                    <div class="mt-3 flex items-center justify-between">
+                                    <div class="mt-3 flex flex-wrap items-center justify-between gap-2">
                                         <div class="flex items-center space-x-4">
                                             <label class="flex items-center space-x-2 cursor-pointer group">
                                                 <input type="checkbox" v-model="dev.is_katapult" @change="updateFleetDevice(dev)" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500">
@@ -488,7 +503,7 @@
                                                 <i class="fas fa-unlink"></i>
                                             </button>
                                         </div>
-                                        <div class="mt-3 flex items-center space-x-3">
+                                        <div class="mt-3 flex flex-wrap items-center gap-2 md:space-x-3">
                                             <div class="flex items-center space-x-1">
                                                 <span class="text-[9px] text-gray-500 font-bold uppercase">Method:</span>
                                                 <span class="text-[9px] bg-orange-900/30 text-orange-300 px-1.5 py-0.5 rounded border border-orange-500/20 font-bold uppercase tracking-tighter">DFU</span>
@@ -601,29 +616,29 @@
             template: `
                 <div v-if="node.visible" class="mb-1 kconfig-item">
                     <div class="flex items-center justify-between p-2 hover:bg-gray-800/80 bg-gray-900/20 rounded border border-gray-800/50 group transition-colors">
-                        <div class="flex items-center space-x-3 flex-1">
+                        <div class="flex items-center space-x-3 flex-1 min-w-0">
                             <!-- Boolean -->
                             <input v-if="node.type === 'bool'" type="checkbox" 
                                    :checked="node.value === 'y'" 
                                    :disabled="node.readonly"
                                    @change="$emit('update', node.name, $event.target.checked ? 'y' : 'n')"
-                                   class="h-4 w-4 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500 disabled:opacity-50">
+                                   class="h-5 w-5 md:h-4 md:w-4 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500 disabled:opacity-50 flex-none">
                             
-                            <div class="flex flex-col">
+                            <div class="flex flex-col min-w-0">
                                 <span class="text-sm" :class="[node.type === 'menu' ? 'font-bold text-blue-400' : 'text-gray-100', node.readonly ? 'opacity-50' : '']">
                                     {{ node.prompt }}
                                 </span>
-                                <span v-if="showRawSymbolNames && node.name" class="text-[9px] text-gray-400 font-mono">{{ node.name }}</span>
+                                <span v-if="showRawSymbolNames && node.name" class="text-[9px] text-gray-400 font-mono truncate">{{ node.name }}</span>
                             </div>
                         </div>
 
-                        <div class="flex items-center space-x-4">
+                        <div class="flex items-center space-x-4 flex-none">
                             <!-- Choice -->
                             <select v-if="node.type === 'choice'" 
                                     :value="node.value"
                                     :disabled="node.readonly"
                                     @change="$emit('update', node.name, $event.target.value)"
-                                    class="mainsail-input rounded px-2 py-1 text-xs bg-gray-900 border-gray-700 min-w-[180px] disabled:opacity-50">
+                                    class="mainsail-input rounded px-2 py-1 text-xs bg-gray-900 border-gray-700 min-w-[120px] md:min-w-[180px] max-w-[50vw] disabled:opacity-50">
                                 <option v-for="c in node.choices" :key="c.name" :value="c.name">{{ c.prompt }}</option>
                             </select>
 
@@ -632,7 +647,7 @@
                                    type="text" :value="node.value"
                                    :disabled="node.readonly"
                                    @input="$emit('update', node.name, $event.target.value)"
-                                   class="mainsail-input rounded px-2 py-1 text-xs w-48 bg-gray-900 border-gray-700 disabled:opacity-50">
+                                   class="mainsail-input rounded px-2 py-1 text-xs w-32 md:w-48 bg-gray-900 border-gray-700 disabled:opacity-50">
                         </div>
                     </div>
                     
@@ -650,6 +665,7 @@
             components: { KconfigNode },
             setup() {
                 const view = ref(localStorage.getItem('kf_view') || 'dashboard');
+                const sidebarOpen = ref(false);
                 const configTree = ref([]);
                 const profiles = ref([]);
                 const fleet = ref([]);
@@ -657,6 +673,7 @@
                 const devices = ref({ serial: [], can: [], dfu: [], linux: [] });
                 const deviceVersions = ref({});
                 const systemKlipperVersion = ref(null);
+                const firmwareName = ref('Klipper');
                 const selectedProfile = ref(localStorage.getItem('kf_profile') || '');
                 const loading = ref(false);
                 const building = ref(false);
@@ -855,10 +872,10 @@
 
                 const fetchKlipperVersion = async () => {
                     try {
-                        const res = await fetch('/klipper/version');
+                        const res = await fetch('/firmware/version');
                         systemKlipperVersion.value = await res.json();
                     } catch (e) {
-                        console.error("Failed to fetch Klipper version", e);
+                        console.error("Failed to fetch firmware version", e);
                         systemKlipperVersion.value = null;
                     }
                 };
@@ -912,6 +929,7 @@
                         const res = await fetch('/api/status');
                         const data = await res.json();
                         isKlipperKconfiglib.value = data.is_klipper_kconfiglib;
+                        firmwareName.value = data.firmware_name || 'Klipper';
                         await fetchKlipperVersion();
                     } catch (e) {
                         console.error("Failed to fetch system status", e);
@@ -1174,7 +1192,7 @@
                         if (!confirmed) return;
                     } else {
                         if (dev.status !== 'service') {
-                            await showAlert("Not In Service", `"${dev.name}" is currently ${formatStatus(dev.status)}. To test the DFU cycle, the device must be running Klipper (In Service).`);
+                            await showAlert("Not In Service", `"${dev.name}" is currently ${formatStatus(dev.status)}. To test the DFU cycle, the device must be running firmware (In Service).`);
                             return;
                         }
 
@@ -1545,14 +1563,14 @@
                 };
 
                 return { 
-                    view, configTree, profiles, fleet, selectedProfile, loading, building, flashing, updating, querying,
+                    view, sidebarOpen, configTree, profiles, fleet, selectedProfile, loading, building, flashing, updating, querying,
                     buildLogs, formattedLogs, expandLogs, expandLogsHeight, updateValue, saveProfile, saveProfileAs, newProfile, deleteProfile, loadProfile, createMissingProfile, startBuild, runBatch, selfUpdate,
                     devices, selectedDevice, discoverDevices, startFlash, quickFlash, quickBuild, quickFlashOnly, buildAndDownload, rebootDevice, statusColor, formatStatus,
                     addDeviceToFleet, attachToFleet, updateFleetDevice, removeDeviceFromFleet, error, modifiedValues, formatNotes,
                     mainsailUrl,
                     modal, showAlert, showConfirm, showPrompt, closeModal, testMagicBaud,
                     services, manageServices, cancelTask, currentTaskId,
-                    showRawSymbolNames, showOptionalFeatures, isKlipperKconfiglib,
+                    showRawSymbolNames, showOptionalFeatures, isKlipperKconfiglib, firmwareName,
                     deviceVersions, systemKlipperVersion, versionMatch, versionColor, versionTitle
                 };
             }

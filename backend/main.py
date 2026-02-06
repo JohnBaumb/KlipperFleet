@@ -31,7 +31,7 @@ except Exception:
     from flash_manager import FlashManager
     from fleet_manager import FleetManager
 
-app = FastAPI(title="KlipperFleet API", version="1.1.0-alpha")
+app = FastAPI(title="KlipperFleet API", version="1.1.1-alpha")
 
 # Configuration
 KLIPPER_DIR: str = os.path.abspath(os.path.expanduser(os.getenv("KLIPPER_DIR", "~/klipper")))
@@ -39,6 +39,42 @@ KATAPULT_DIR: str = os.path.abspath(os.path.expanduser(os.getenv("KATAPULT_DIR",
 DATA_DIR: str = os.path.abspath(os.path.expanduser(os.getenv("DATA_DIR", "~/printer_data/config/klipperfleet")))
 PROFILES_DIR: str = os.path.join(DATA_DIR, "profiles")
 ARTIFACTS_DIR: str = os.path.join(DATA_DIR, "artifacts")
+
+def _detect_firmware_name(firmware_dir: str) -> str:
+    """Detects whether the firmware directory contains Klipper or a fork (e.g. Kalico).
+    
+    Kalico clones into ~/klipper so we can't rely on directory name.
+    Detection order:
+    1. klippy/__init__.py APP_NAME (most reliable, Kalico sets APP_NAME = "Kalico")
+    2. Git remote URL (contains 'kalico')
+    3. Default to 'Klipper'
+    """
+    # Check klippy/__init__.py for APP_NAME
+    klippy_init: str = os.path.join(firmware_dir, "klippy", "__init__.py")
+    if os.path.exists(klippy_init):
+        try:
+            with open(klippy_init, 'r') as f:
+                for line in f:
+                    if line.strip().startswith("APP_NAME"):
+                        if "kalico" in line.lower():
+                            return "Kalico"
+                        break
+        except Exception:
+            pass
+    # Check git remote as a fallback
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=firmware_dir,
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0 and "kalico" in result.stdout.strip().lower():
+            return "Kalico"
+    except Exception:
+        pass
+    return "Klipper"
+
+FIRMWARE_NAME: str = _detect_firmware_name(KLIPPER_DIR)
 
 # Ensure directories exist
 os.makedirs(PROFILES_DIR, exist_ok=True)
@@ -191,12 +227,14 @@ async def get_status() -> Dict[str, Any]:
     return {
         "message": "KlipperFleet API is running", 
         "klipper_dir": KLIPPER_DIR,
+        "firmware_name": FIRMWARE_NAME,
         "is_klipper_kconfiglib": kconfig_mgr.is_klipper_kconfiglib
     }
 
 @app.get("/klipper/version")
+@app.get("/firmware/version")
 async def get_klipper_version() -> Dict[str, str]:
-    """Returns the host Klipper git version information."""
+    """Returns the host firmware (Klipper/Kalico) git version information."""
     return await build_mgr.get_klipper_version()
 
 class ConfigPreview(BaseModel):
@@ -230,7 +268,7 @@ async def post_config_tree(preview: ConfigPreview, request: Request) -> List[Dic
     except FileNotFoundError:
         raise HTTPException(
             status_code=404, 
-            detail="Kconfig file not found. This is usually caused by a user running Kalico (unsupported but on the roadmap) or Klipper is not installed in the default location."
+            detail="Kconfig file not found. Ensure your firmware (Klipper/Kalico) is installed and KLIPPER_DIR is set correctly. Run 'echo $KLIPPER_DIR' to verify."
         )
     except Exception as e:
         import traceback
@@ -265,7 +303,7 @@ async def save_profile(profile: ProfileSave) -> Dict[str, str]:
     except FileNotFoundError:
         raise HTTPException(
             status_code=404, 
-            detail="Kconfig file not found. This is usually caused by a user running Kalico (unsupported but on the roadmap) or Klipper is not installed in the default location."
+            detail="Kconfig file not found. Ensure your firmware (Klipper/Kalico) is installed and KLIPPER_DIR is set correctly. Run 'echo $KLIPPER_DIR' to verify."
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -321,7 +359,7 @@ async def manage_klipper_services(action: str) -> str:
         target_services: List[str] = [s for s in services if s and s != "klipperfleet.service" and s.endswith(".service")]
         
         if not target_services:
-            return f">>> No Klipper/Moonraker services found to {action}.\n"
+            return f">>> No firmware/Moonraker services found to {action}.\n"
         
         for service in target_services:
             cmd: List[str] = ["sudo", "systemctl", action, service]

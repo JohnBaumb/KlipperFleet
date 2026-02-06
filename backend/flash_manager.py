@@ -50,12 +50,13 @@ class FlashManager:
             
             # If it's a by-id device, it's almost certainly an MCU
             if dev.startswith("/dev/serial/by-id/"):
-                # If it has "klipper" in the name, it's in firmware mode (service)
+                # If it has "klipper" or "kalico" in the name, it's in firmware mode (service)
                 # If it has "katapult" or "canboot", it's in bootloader mode (ready)
                 mode = "ready"
-                if "klipper" in dev.lower():
+                dev_lower = dev.lower()
+                if "klipper" in dev_lower or "kalico" in dev_lower:
                     mode = "service"
-                elif "katapult" in dev.lower() or "canboot" in dev.lower():
+                elif "katapult" in dev_lower or "canboot" in dev_lower:
                     mode = "ready"
                 elif is_configured:
                     mode = "service"
@@ -79,9 +80,10 @@ class FlashManager:
                 if not already_added:
                     # For generic tty devices, we rely on is_configured or name hints
                     mode = "ready"
-                    if "klipper" in dev.lower():
+                    dev_lower = dev.lower()
+                    if "klipper" in dev_lower or "kalico" in dev_lower:
                         mode = "service"
-                    elif "katapult" in dev.lower() or "canboot" in dev.lower():
+                    elif "katapult" in dev_lower or "canboot" in dev_lower:
                         mode = "ready"
                     elif is_configured:
                         mode = "service"
