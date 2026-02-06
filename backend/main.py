@@ -5,9 +5,14 @@ from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, AsyncGenerator
 import os
 import asyncio
+import logging
 import subprocess
 import sys
+import re
+import uuid
 from asyncio.subprocess import Process
+
+logger = logging.getLogger("klipperfleet")
 
 # Ensure the backend package directory is first on sys.path so local module
 # imports (kconfig_manager, build_manager, etc.) work whether uvicorn
@@ -44,6 +49,14 @@ build_mgr = BuildManager(KLIPPER_DIR, ARTIFACTS_DIR)
 flash_mgr = FlashManager(KLIPPER_DIR, KATAPULT_DIR)
 fleet_mgr = FleetManager(DATA_DIR)
 
+# Profile name validation: only alphanumeric, underscores, hyphens, and dots
+_PROFILE_NAME_RE = re.compile(r'^[a-zA-Z0-9_.-]+$')
+
+def validate_profile_name(name: str) -> None:
+    """Validates a profile name to prevent path traversal."""
+    if not name or not _PROFILE_NAME_RE.match(name) or '..' in name:
+        raise HTTPException(status_code=400, detail=f"Invalid profile name: '{name}'. Only alphanumeric characters, underscores, hyphens, and dots are allowed.")
+
 def get_flash_offset(profile_name: str) -> str:
     """Extracts the flash offset address from a profile's .config file."""
     config_path: str = os.path.join(PROFILES_DIR, f"{profile_name}.config")
@@ -68,14 +81,29 @@ def get_flash_offset(profile_name: str) -> str:
                 if f"{key}=y" in content:
                     return addr
     except Exception:
-        pass
+        logger.warning("Failed to read config file %s for bootloader offset, using default", config_path, exc_info=True)
     return "0x08000000"
 
 class TaskStore:
+    MAX_COMPLETED_TASKS: int = 50
+
     def __init__(self) -> None:
-        self.tasks = {}
+        self.tasks: Dict[str, Dict[str, Any]] = {}
+
+    def _cleanup(self) -> None:
+        """Purge oldest completed tasks when the limit is exceeded."""
+        completed = [
+            (tid, t) for tid, t in self.tasks.items() if t.get("completed")
+        ]
+        if len(completed) <= self.MAX_COMPLETED_TASKS:
+            return
+        # Keep the most recent ones (dict insertion order is preserved in 3.7+)
+        to_remove = len(completed) - self.MAX_COMPLETED_TASKS
+        for tid, _ in completed[:to_remove]:
+            del self.tasks[tid]
 
     def create_task(self, task_id: str) -> None:
+        self._cleanup()
         self.tasks[task_id] = {
             "status": "running", 
             "logs": [], 
@@ -112,7 +140,7 @@ class TaskStore:
                 self.tasks[task_id]["status"] = status
             self.tasks[task_id]["completed"] = True
 
-    def get_task(self, task_id: str):
+    def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         return self.tasks.get(task_id)
 
 task_store = TaskStore()
@@ -186,14 +214,17 @@ async def post_config_tree(preview: ConfigPreview, request: Request) -> List[Dic
             raise HTTPException(status_code=404, detail=f"Profile {preview.profile} not found")
     
     try:
-        kconfig_mgr.load_kconfig(config_path)
+        await kconfig_mgr.load_kconfig(config_path)
         # Apply unsaved values in multiple passes to handle deep dependencies
         for i in range(10):
             for item in preview.values:
                 try:
                     kconfig_mgr.set_value(item.name, item.value)
                 except Exception:
-                    pass
+                    # Expected: values may fail on early passes due to unresolved dependencies.
+                    # They will succeed on later passes as cascading deps resolve.
+                    if i == 9:
+                        logger.debug("Kconfig value %s=%s still failing after final pass", item.name, item.value)
             
         return kconfig_mgr.get_menu_tree(show_optional=preview.show_optional)
     except FileNotFoundError:
@@ -214,6 +245,9 @@ async def get_config_tree(request: Request, profile: Optional[str] = None, show_
 @app.post("/config/save")
 async def save_profile(profile: ProfileSave) -> Dict[str, str]:
     """Saves a set of configuration values to a profile file."""
+    validate_profile_name(profile.name)
+    if profile.base_profile:
+        validate_profile_name(profile.base_profile)
     try:
         config_path: Optional[str] = None
         if profile.base_profile:
@@ -221,7 +255,7 @@ async def save_profile(profile: ProfileSave) -> Dict[str, str]:
             if not os.path.exists(config_path):
                 config_path = None
         
-        kconfig_mgr.load_kconfig(config_path)
+        await kconfig_mgr.load_kconfig(config_path)
         for item in profile.values:
             kconfig_mgr.set_value(item.name, item.value)
         
@@ -245,6 +279,7 @@ async def list_profiles() -> Dict[str, List[str]]:
 @app.delete("/profiles/{name}")
 async def delete_profile(name: str) -> Dict[str, str]:
     """Deletes a saved configuration profile."""
+    validate_profile_name(name)
     config_path: str = os.path.join(PROFILES_DIR, f"{name}.config")
     if os.path.exists(config_path):
         os.remove(config_path)
@@ -255,7 +290,8 @@ async def delete_profile(name: str) -> Dict[str, str]:
 @app.get("/build/{profile}")
 async def build_profile(profile: str) -> StreamingResponse:
     """Starts a build for the specified profile and streams the output."""
-    task_id: str = f"task_{int(asyncio.get_event_loop().time())}"
+    validate_profile_name(profile)
+    task_id: str = f"task_{uuid.uuid4().hex[:12]}"
     task_store.create_task(task_id)
 
     config_path: str = os.path.join(PROFILES_DIR, f"{profile}.config")
@@ -353,7 +389,7 @@ async def cancel_task_operation(task_id: str) -> Dict[str, str]:
 @app.get("/batch/{action}")
 async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dict[str, str]:
     """Performs batch operations (build, flash-ready, flash-all, etc.)"""
-    task_id: str = f"task_{int(asyncio.get_event_loop().time())}"
+    task_id: str = f"task_{uuid.uuid4().hex[:12]}"
     task_store.create_task(task_id)
 
     async def run_task() -> None:
@@ -381,7 +417,7 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                         async for log in build_mgr.run_build(config_path):
                             if task_store.is_cancelled(task_id): return
                             task_store.add_log(task_id, log)
-                            if "!!! Error" in log or "!!! Build failed" in log:
+                            if "!!! Error" in log or "Build failed" in log:
                                 build_success = False
                         build_results[profile] = "SUCCESS" if build_success else "FAILED"
                         task_store.add_log(task_id, f">>> BATCH BUILD: Finished {profile}\n")
@@ -932,7 +968,7 @@ async def discover_devices() -> Dict[str, List[Dict[str, Any]]]:
 @app.post("/flash")
 async def flash_device(req: FlashRequest) -> StreamingResponse:
     """Flashes the specified profile to a device."""
-    task_id: str = f"task_{int(asyncio.get_event_loop().time())}"
+    task_id: str = f"task_{uuid.uuid4().hex[:12]}"
     task_store.create_task(task_id)
     task_store.tasks[task_id]["is_bus_task"] = True
 
@@ -964,7 +1000,8 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                         baudrate = d.get("baudrate", baudrate)
                         break
             except Exception:
-                pass
+                logger.warning("Failed to read fleet for device %s, using defaults (interface=%s, baudrate=%s)",
+                               req.device_id, interface, baudrate, exc_info=True)
 
             # Snapshot current serial devices BEFORE reboot (for diff-based detection)
             initial_serials: List[str] = [d['id'] for d in await flash_mgr.discover_serial_devices(skip_moonraker=True)]
@@ -1125,7 +1162,7 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
 @app.post("/flash/reboot")
 async def reboot_device(device_id: str, mode: str = "katapult", method: Optional[str] = None) -> StreamingResponse:
     """Reboots a device."""
-    task_id: str = f"task_{int(asyncio.get_event_loop().time())}"
+    task_id: str = f"task_{uuid.uuid4().hex[:12]}"
     task_store.create_task(task_id)
     task_store.tasks[task_id]["is_bus_task"] = True
 
@@ -1135,7 +1172,7 @@ async def reboot_device(device_id: str, mode: str = "katapult", method: Optional
     is_bridge = dev.get('is_bridge', False)
     
     # Use provided method or fall back to fleet entry or default to 'can'
-    actual_method: str | Any = method if method else dev.get('method', 'can')
+    actual_method: str = method if method else dev.get('method', 'can')
     interface = dev.get('interface', 'can0')
     
     async def generate() -> AsyncGenerator[str, None]:
@@ -1149,7 +1186,7 @@ async def reboot_device(device_id: str, mode: str = "katapult", method: Optional
 @app.post("/debug/test_magic_baud")
 async def test_magic_baud(device_id: str, full_cycle: bool = False) -> StreamingResponse:
     """Tests the 1200bps magic baud trick on a device, optionally testing the full cycle."""
-    task_id: str = f"task_{int(asyncio.get_event_loop().time())}"
+    task_id: str = f"task_{uuid.uuid4().hex[:12]}"
     task_store.create_task(task_id)
 
     async def generate() -> AsyncGenerator[str, None]:
@@ -1217,8 +1254,6 @@ async def test_magic_baud(device_id: str, full_cycle: bool = False) -> Streaming
             task_store.complete_task(task_id)
             
     return StreamingResponse(generate(), media_type="text/plain", headers={"X-Task-Id": task_id})
-            
-    return StreamingResponse(generate(), media_type="text/plain", headers={"X-Task-Id": task_id})
 
 @app.post("/api/self-update")
 async def self_update(background_tasks: BackgroundTasks) -> Dict[str, str]:
@@ -1228,10 +1263,13 @@ async def self_update(background_tasks: BackgroundTasks) -> Dict[str, str]:
         raise HTTPException(status_code=404, detail="Update script not found")
     
     try:
-        subprocess.check_call(["git", "fetch", "origin"], cwd=os.path.dirname(os.path.dirname(__file__)))
-        subprocess.check_call(["git", "reset", "--hard", "origin/main"], cwd=os.path.dirname(os.path.dirname(__file__)))
+        repo_dir = os.path.dirname(os.path.dirname(__file__))
+        fetch_proc = await asyncio.create_subprocess_exec("git", "fetch", "origin", cwd=repo_dir, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await fetch_proc.wait()
+        reset_proc = await asyncio.create_subprocess_exec("git", "reset", "--hard", "origin/main", cwd=repo_dir, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await reset_proc.wait()
     except Exception:
-        pass
+        logger.exception("Git fetch/reset failed during self-update, proceeding with update.sh anyway")
 
     def run_update() -> None:
         subprocess.Popen(["bash", update_script], start_new_session=True)

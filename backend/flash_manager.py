@@ -2,7 +2,7 @@ import os
 import asyncio
 import glob
 import httpx
-from typing import List, Dict, AsyncGenerator, Optional, Any
+from typing import List, Dict, AsyncGenerator, Optional, Any, Set
 from asyncio.subprocess import Process
 
 class FlashManager:
@@ -20,8 +20,8 @@ class FlashManager:
         # CAN operations (discovery, flashing) must be mutexed to prevent bus contention.
         # High-bandwidth flashing can fail if background discovery queries are running.
         self._can_lock: asyncio.Lock = asyncio.Lock()
-        self._can_cache: List[Dict[str, str]] = []
-        self._can_cache_time: float = 0.0
+        self._can_cache: Dict[str, List[Dict[str, str]]] = {}
+        self._can_cache_time: Dict[str, float] = {}
         self._can_cache_ttl_s: float = 2.0 # Short TTL to keep status feeling "live"
 
     async def discover_serial_devices(self, skip_moonraker: bool = False) -> List[Dict[str, str]]:
@@ -61,7 +61,7 @@ class FlashManager:
                     mode = "service"
                 
                 if is_configured:
-                    name: str = f"{moonraker_mcus[dev]['name']} ({name})"
+                    name = f"{moonraker_mcus[dev]['name']} ({name})"
                 devices.append({"id": dev, "name": name, "type": "usb", "mode": mode})
             
             # If it's a ttyACM/ttyUSB device, we show it if it's NOT already represented by a by-id link
@@ -87,12 +87,12 @@ class FlashManager:
                         mode = "service"
                     
                     if is_configured:
-                        name: str = f"{moonraker_mcus[dev]['name']} ({name})"
+                        name = f"{moonraker_mcus[dev]['name']} ({name})"
                     devices.append({"id": dev, "name": name, "type": "usb", "mode": mode})
 
             # If it's a raw UART device, only show it if it's actually configured in Klipper
             elif is_configured:
-                name: str = f"{moonraker_mcus[dev]['name']} ({name})"
+                name = f"{moonraker_mcus[dev]['name']} ({name})"
                 devices.append({"id": dev, "name": name, "type": "uart", "mode": "service"})
                 
         return devices
@@ -322,9 +322,10 @@ class FlashManager:
             stdout, _ = await process.communicate()
             if b"state UP" not in stdout:
                 print(f"Bringing up {interface}...")
-                await asyncio.create_subprocess_exec(
+                process = await asyncio.create_subprocess_exec(
                     "sudo", "ip", "link", "set", interface, "up", "type", "can", "bitrate", str(bitrate)
                 )
+                await process.wait()
                 await asyncio.sleep(1)
         except Exception as e:
             print(f"Error ensuring CAN up: {e}")
@@ -341,7 +342,7 @@ class FlashManager:
             stdout, _ = await process.communicate()
             for line in stdout.decode().splitlines():
                 if ": " in line:
-                    iface: str = line.split(":")[1].strip()
+                    iface: str = line.split(":")[1].strip().split("@")[0]
                     can_interfaces.append(iface)
             return can_interfaces
         except Exception as e:
@@ -369,8 +370,8 @@ class FlashManager:
         await self.ensure_canbus_up(interface=interface)
         
         now: float = asyncio.get_event_loop().time()
-        if not force and (now - self._can_cache_time) < self._can_cache_ttl_s:
-            return list(self._can_cache)
+        if not force and (now - self._can_cache_time.get(interface, 0.0)) < self._can_cache_ttl_s:
+            return list(self._can_cache.get(interface, []))
 
         async with self._can_lock:
             print(">>> CAN Lock Acquired for discovery")
@@ -481,8 +482,8 @@ class FlashManager:
                             seen_uuids[identifier]["stats"] = info["stats"]
 
             results = list(seen_uuids.values())
-            self._can_cache = results
-            self._can_cache_time = asyncio.get_event_loop().time()
+            self._can_cache[interface] = results
+            self._can_cache_time[interface] = asyncio.get_event_loop().time()
             
             print(">>> CAN Lock Released")
             return results
@@ -535,8 +536,9 @@ class FlashManager:
             
         return None
 
-    async def resolve_dfu_id(self, device_id: str, known_dfu_id: Optional[str] = None) -> str:
-        """Attempts to find a DFU device ID that matches a Serial ID (via serial number)."""
+    async def resolve_dfu_id(self, device_id: str, known_dfu_id: Optional[str] = None, strict: bool = False) -> str:
+        """Attempts to find a DFU device ID that matches a Serial ID (via serial number).
+        If strict=True, does not fall back to single-device assumption."""
         devs: List[Dict[str, str]] = await self.discover_dfu_devices()
         
         if not devs:
@@ -550,7 +552,7 @@ class FlashManager:
             
             # 2. If known_dfu_id is a generic name (like STM32FxSTM32), 
             # and there's only one DFU device, assume it's the one.
-            if len(devs) == 1:
+            if not strict and len(devs) == 1:
                 return devs[0]['id']
 
         # 3. Try to match by serial number
@@ -565,7 +567,8 @@ class FlashManager:
         # 4. Fallback: If there is only ONE DFU device connected, assume it is the target.
         # This handles cases where the DFU serial is generic (e.g. "STM32FxSTM32") or
         # does not match the Klipper serial number.
-        if len(devs) == 1:
+        # Skipped in strict mode to avoid flashing the wrong device.
+        if not strict and len(devs) == 1:
             return devs[0]['id']
 
         return device_id
@@ -724,10 +727,15 @@ class FlashManager:
                 # Regular reboot (Return to Service)
                 # We send a Katapult 'COMPLETE' command to jump to the application.
                 # This requires assigning a temporary node ID first.
-                py_cmd: str = f"""
+                # Pass device_id and interface as command-line args to avoid injection.
+                py_cmd: str = """
 import socket
 import struct
+import sys
 import time
+
+interface = sys.argv[1]
+device_id = sys.argv[2]
 
 def crc16_ccitt(buf):
     crc = 0xffff
@@ -740,31 +748,26 @@ def crc16_ccitt(buf):
 def send_can(id, data):
     try:
         with socket.socket(socket.AF_CAN, socket.SOCK_RAW, socket.CAN_RAW) as s:
-            s.bind(("{interface}",))
-            # CAN_FMT = "<IB3x8s"
+            s.bind((interface,))
             can_pkt = struct.pack("<IB3x8s", id, len(data), data.ljust(8, b'\\x00'))
             s.send(can_pkt)
     except Exception as e:
-        print(f"Socket error: {{e}}")
+        print(f"Socket error: {e}")
 
-uuid_bytes = bytes.fromhex("{device_id}")
+uuid_bytes = bytes.fromhex(device_id)
 
-# 1. Set Node ID to 0x200 (index 128)
-# Katapult Admin ID is always 0x3f0
 set_id_payload = bytes([0x11]) + uuid_bytes + bytes([128])
 send_can(0x3f0, set_id_payload)
 time.sleep(0.1)
 
-# 2. Send COMPLETE command (0x15) to Node ID 0x200
-# Katapult packet: [0x01, 0x88, 0x15, 0x00, CRC_L, CRC_H, 0x99, 0x03]
 cmd_body = bytes([0x15, 0x00])
 crc = crc16_ccitt(cmd_body)
 pkt = bytes([0x01, 0x88]) + cmd_body + struct.pack("<H", crc) + bytes([0x99, 0x03])
 send_can(0x200, pkt)
-print("Jump command sent to UUID {device_id}")
+print(f"Jump command sent to UUID {device_id}")
 """
                 process: Process = await asyncio.create_subprocess_exec(
-                    "python3", "-c", py_cmd,
+                    "python3", "-c", py_cmd, interface, device_id,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT
                 )
@@ -825,7 +828,7 @@ print("Jump command sent to UUID {device_id}")
                 )
                 stdout, _ = await process.communicate()
                 yield stdout.decode()
-                self._can_cache_time = 0.0 # Invalidate cache
+                self._can_cache_time[interface] = 0.0 # Invalidate cache
                 yield f">>> CAN Lock Released\n"
                 return
 
@@ -917,7 +920,7 @@ print("Jump command sent to UUID {device_id}")
             ]
             async for line in self._run_flash_command(cmd):
                 yield line
-            self._can_cache_time = 0.0 # Invalidate cache
+            self._can_cache_time[interface] = 0.0 # Invalidate cache
             yield f">>> CAN Lock Released\n"
 
     async def flash_dfu(self, device_id: str, firmware_path: str, address: str = "0x08000000", leave: bool = True) -> AsyncGenerator[str, None]:
@@ -956,6 +959,22 @@ print("Jump command sent to UUID {device_id}")
                     if attempt > 0:
                         yield f">>> Retry attempt {attempt + 1}/{max_retries}...\n"
                         await asyncio.sleep(2)
+                        # Re-resolve DFU device ID in case USB re-enumerated
+                        self._dfu_cache_time = 0.0
+                        new_devs = await self.discover_dfu_devices()
+                        if new_devs:
+                            # Rebuild the command with the potentially new device ID
+                            cmd = ["sudo", "dfu-util", "-a", "0", "-d", "0483:df11", "-s", address, "-D", firmware_path]
+                            resolved = new_devs[0]  # Best effort: pick the first DFU device
+                            for d in new_devs:
+                                if d['id'] == device_id or d.get('serial') == device_id:
+                                    resolved = d
+                                    break
+                            rid = resolved['id']
+                            if rid and len(rid) > 5 and not rid.startswith("/dev/"):
+                                cmd.extend(["-S", rid])
+                            elif rid and "-" in rid and not rid.startswith("/dev/"):
+                                cmd.extend(["-p", rid])
 
                     current_success = False
                     async for line in self._run_flash_command(cmd):
@@ -1001,10 +1020,22 @@ print("Jump command sent to UUID {device_id}")
         yield f">>> Installing Linux MCU binary: {firmware_path}...\n"
         try:
             # 1. Ensure service is stopped and file is not busy
-            await asyncio.create_subprocess_exec("sudo", "systemctl", "stop", "klipper-mcu.service")
+            stop_proc: Process = await asyncio.create_subprocess_exec(
+                "sudo", "systemctl", "stop", "klipper-mcu.service",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT
+            )
+            stop_out, _ = await stop_proc.communicate()
+            if stop_proc.returncode != 0:
+                yield f">>> WARNING: Could not stop klipper-mcu.service (rc={stop_proc.returncode}): {stop_out.decode().strip()}\n"
             
             # Kill any remaining processes using the file
-            await asyncio.create_subprocess_exec("sudo", "fuser", "-k", "/usr/local/bin/klipper_mcu")
+            fuser_proc: Process = await asyncio.create_subprocess_exec(
+                "sudo", "fuser", "-k", "/usr/local/bin/klipper_mcu",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT
+            )
+            await fuser_proc.communicate()
             await asyncio.sleep(2)
             
             # 2. Copy to /usr/local/bin/klipper_mcu
@@ -1020,15 +1051,15 @@ print("Jump command sent to UUID {device_id}")
                 return
 
             # 2. Ensure it's executable
-            cmd: List[str] = ["sudo", "chmod", "+x", "/usr/local/bin/klipper_mcu"]
-            process: Process = await asyncio.create_subprocess_exec(*cmd)
+            cmd = ["sudo", "chmod", "+x", "/usr/local/bin/klipper_mcu"]
+            process = await asyncio.create_subprocess_exec(*cmd)
             await process.wait()
 
             yield ">>> Linux MCU binary installed successfully.\n"
         except Exception as e:
             yield f"!!! Error during Linux MCU installation: {str(e)}\n"
 
-    async def _run_flash_command(self, cmd: list, ok_returncodes: Optional[set[int]] = None) -> AsyncGenerator[str, None]:
+    async def _run_flash_command(self, cmd: list, ok_returncodes: Optional[Set[int]] = None) -> AsyncGenerator[str, None]:
         if ok_returncodes is None:
             ok_returncodes = {0}
         process: Process = await asyncio.create_subprocess_exec(

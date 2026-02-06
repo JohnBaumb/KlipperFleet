@@ -32,13 +32,14 @@ endmenu
     
     return KconfigManager(str(klipper_dir))
 
-def test_load_kconfig(kconfig_mgr):
-    kconfig_mgr.load_kconfig()
+@pytest.mark.asyncio
+async def test_load_kconfig(kconfig_mgr):
+    await kconfig_mgr.load_kconfig()
     assert kconfig_mgr.kconf is not None
     assert "BOARD_MCU" in kconfig_mgr.kconf.syms
 
 def test_get_menu_tree(kconfig_mgr):
-    kconfig_mgr.load_kconfig()
+    # get_menu_tree calls _load_kconfig_sync internally if needed
     tree = kconfig_mgr.get_menu_tree()
     
     assert len(tree) > 0
@@ -53,7 +54,7 @@ def test_get_menu_tree(kconfig_mgr):
     assert len(comm_menu['children']) > 0
 
 def test_set_value(kconfig_mgr):
-    kconfig_mgr.load_kconfig()
+    # set_value calls _load_kconfig_sync internally if needed
     kconfig_mgr.set_value("CANBUS_INTERFACE", "y")
     assert kconfig_mgr.kconf.syms["CANBUS_INTERFACE"].str_value == "y"
     
@@ -61,7 +62,6 @@ def test_set_value(kconfig_mgr):
     assert kconfig_mgr.kconf.syms["CANBUS_SPEED"].visibility > 0
 
 def test_save_config(kconfig_mgr, tmp_path):
-    kconfig_mgr.load_kconfig()
     kconfig_mgr.set_value("BOARD_MCU", "rp2040")
     
     out_config = tmp_path / "test.config"

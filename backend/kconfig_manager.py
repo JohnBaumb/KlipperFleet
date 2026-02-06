@@ -1,9 +1,10 @@
+import asyncio
 import os
 import sys
 from typing import List, Dict, Any, Optional
 
 # Global placeholder for the kconfiglib module
-kconfiglib = None
+kconfiglib: Any = None
 _is_klipper_kconfiglib = False
 
 class KconfigManager:
@@ -11,6 +12,7 @@ class KconfigManager:
         self.klipper_dir: str = klipper_dir
         self.kconfig_file: str = os.path.join(klipper_dir, "src", "Kconfig")
         self.kconf = None
+        self._kconfig_lock: asyncio.Lock = asyncio.Lock()
         self._import_kconfiglib()
 
     @property
@@ -45,8 +47,13 @@ class KconfigManager:
         except ImportError:
             raise ImportError("Could not load kconfiglib from Klipper directory or system.")
 
-    def load_kconfig(self, config_file: Optional[str] = None) -> None:
+    async def load_kconfig(self, config_file: Optional[str] = None) -> None:
         """Loads the Kconfig file and optionally an existing .config file."""
+        async with self._kconfig_lock:
+            self._load_kconfig_sync(config_file)
+
+    def _load_kconfig_sync(self, config_file: Optional[str] = None) -> None:
+        """Internal synchronous kconfig loading, called under lock."""
         # Set environment variables that Klipper's Kconfig expects
         abs_klipper_dir: str = os.path.abspath(self.klipper_dir)
         os.environ["SRCTREE"] = abs_klipper_dir
@@ -82,7 +89,7 @@ class KconfigManager:
     def get_menu_tree(self, show_optional: bool = False) -> List[Dict[str, Any]]:
         """Returns a JSON-serializable tree of the Kconfig menu."""
         if not self.kconf:
-            self.load_kconfig()
+            self._load_kconfig_sync()
         
         assert self.kconf is not None
         return self._parse_menu_item(self.kconf.top_node, show_optional=show_optional)
@@ -210,7 +217,7 @@ class KconfigManager:
     def set_value(self, name: str, value: str) -> None:
         """Sets a value for a symbol in the current configuration."""
         if not self.kconf:
-            self.load_kconfig()
+            self._load_kconfig_sync()
         
         assert self.kconf is not None
         

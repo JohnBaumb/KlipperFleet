@@ -333,6 +333,7 @@
                                             <div class="flex items-center space-x-2">
                                                 <p class="text-sm font-bold text-gray-100 truncate">{{ dev.name }}</p>
                                                 <span class="text-[8px] font-bold uppercase" :class="statusColor(dev.mode)">{{ formatStatus(dev.mode) }}</span>
+                                                <span v-if="dev.interface" class="text-[8px] font-bold uppercase text-purple-400 bg-purple-900/30 px-1.5 py-0.5 rounded">{{ dev.interface }}</span>
                                             </div>
                                             <p class="text-[10px] text-gray-400 font-mono truncate">{{ dev.id }}</p>
                                         </div>
@@ -435,6 +436,11 @@
                                             <option :value="500000">500000</option>
                                             <option :value="1000000">1000000</option>
                                         </select>
+                                        <!-- CAN interface selector -->
+                                        <input v-if="dev.method === 'can'" v-model="dev.interface" @change="updateFleetDevice(dev)"
+                                               class="mainsail-input text-[10px] p-1 rounded bg-gray-900 border-gray-700 text-gray-400 font-bold w-16"
+                                               title="CAN interface (e.g. can0, can1)"
+                                               placeholder="can0">
                                     </div>
                                     <div class="mt-3 flex items-center justify-between">
                                         <div class="flex items-center space-x-4">
@@ -1336,7 +1342,7 @@
                         id: dev.id, 
                         profile: '', 
                         method, 
-                        interface: 'can0',
+                        interface: dev.interface || 'can0',
                         baudrate: 250000,  // Default baudrate for serial (Katapult default)
                         notes: '',
                         is_katapult: dev.id.toLowerCase().includes('katapult') || dev.id.toLowerCase().includes('canboot'),
@@ -1490,14 +1496,28 @@
                     discoverDevices();
                     fetchSystemStatus();
                     
-                    // Refresh fleet status every 30 seconds
-                    setInterval(() => {
-                        fetchFleet();
+                    // Refresh fleet status every 30 seconds (with error backoff)
+                    let fleetErrors = 0;
+                    let fleetInterval = setInterval(() => {
+                        fetchFleet().then(() => { fleetErrors = 0; }).catch(() => {
+                            fleetErrors++;
+                            if (fleetErrors >= 5) {
+                                clearInterval(fleetInterval);
+                                console.warn('Fleet polling stopped after repeated failures');
+                            }
+                        });
                     }, 30000);
 
-                    // Refresh service status every 10 seconds
-                    setInterval(() => {
-                        fetchServices();
+                    // Refresh service status every 10 seconds (with error backoff)
+                    let serviceErrors = 0;
+                    let serviceInterval = setInterval(() => {
+                        fetchServices().then(() => { serviceErrors = 0; }).catch(() => {
+                            serviceErrors++;
+                            if (serviceErrors >= 5) {
+                                clearInterval(serviceInterval);
+                                console.warn('Service polling stopped after repeated failures');
+                            }
+                        });
                     }, 10000);
                 });
 
@@ -1511,8 +1531,15 @@
 
                 const formatNotes = (text) => {
                     if (!text) return '';
+                    // Escape HTML entities first to prevent XSS
+                    const escaped = text
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;')
+                        .replace(/"/g, '&quot;')
+                        .replace(/'/g, '&#039;');
                     const urlRegex = /(https?:\/\/[^\s]+)/g;
-                    return text.replace(urlRegex, (url) => {
+                    return escaped.replace(urlRegex, (url) => {
                         return `<a href="${url}" target="_blank" class="text-blue-400 hover:underline">${url}</a>`;
                     });
                 };
