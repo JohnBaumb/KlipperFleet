@@ -190,6 +190,9 @@ class ProfileSave(BaseModel):
     values: List[ConfigValue]
     base_profile: Optional[str] = None
 
+class ProfileRename(BaseModel):
+    new_name: str
+
 class Device(BaseModel):
     name: str
     id: str
@@ -314,6 +317,26 @@ async def list_profiles() -> Dict[str, List[str]]:
     profiles: List[str] = [f.replace(".config", "") for f in os.listdir(PROFILES_DIR) if f.endswith(".config")]
     return {"profiles": profiles}
 
+@app.get("/profiles/info")
+async def get_profiles_info() -> Dict[str, Dict[str, bool]]:
+    """Returns metadata about all profiles (CAN bridge, Linux MCU detection)."""
+    info: Dict[str, Dict[str, bool]] = {}
+    for f in os.listdir(PROFILES_DIR):
+        if not f.endswith(".config"):
+            continue
+        name = f[:-7]  # Remove .config suffix
+        config_path = os.path.join(PROFILES_DIR, f)
+        try:
+            with open(config_path, 'r') as fh:
+                content = fh.read()
+                info[name] = {
+                    "is_can_bridge": "CONFIG_USBCANBUS=y" in content,
+                    "is_linux": "CONFIG_MACH_LINUX=y" in content
+                }
+        except Exception:
+            info[name] = {"is_can_bridge": False, "is_linux": False}
+    return info
+
 @app.delete("/profiles/{name}")
 async def delete_profile(name: str) -> Dict[str, str]:
     """Deletes a saved configuration profile."""
@@ -324,6 +347,38 @@ async def delete_profile(name: str) -> Dict[str, str]:
         return {"message": f"Profile {name} deleted successfully"}
     else:
         raise HTTPException(status_code=404, detail=f"Profile {name} not found")
+
+@app.post("/profiles/{name}/rename")
+async def rename_profile(name: str, body: ProfileRename) -> Dict[str, str]:
+    """Renames a profile and updates all fleet device references."""
+    validate_profile_name(name)
+    validate_profile_name(body.new_name)
+    
+    if name == body.new_name:
+        return {"message": "Name unchanged"}
+    
+    old_path = os.path.join(PROFILES_DIR, f"{name}.config")
+    new_path = os.path.join(PROFILES_DIR, f"{body.new_name}.config")
+    
+    if not os.path.exists(old_path):
+        raise HTTPException(status_code=404, detail=f"Profile '{name}' not found")
+    if os.path.exists(new_path):
+        raise HTTPException(status_code=409, detail=f"Profile '{body.new_name}' already exists")
+    
+    # Rename the config file
+    os.rename(old_path, new_path)
+    
+    # Rename any matching artifacts (.bin, .elf)
+    for ext in [".bin", ".elf"]:
+        old_artifact = os.path.join(ARTIFACTS_DIR, f"{name}{ext}")
+        new_artifact = os.path.join(ARTIFACTS_DIR, f"{body.new_name}{ext}")
+        if os.path.exists(old_artifact):
+            os.rename(old_artifact, new_artifact)
+    
+    # Update fleet references
+    fleet_mgr.rename_profile(name, body.new_name)
+    
+    return {"message": f"Profile renamed from '{name}' to '{body.new_name}'"}
 
 @app.get("/build/{profile}")
 async def build_profile(profile: str) -> StreamingResponse:

@@ -84,3 +84,16 @@ class FleetManager:
                     d['live_version'] = live_version
                     break
             self._write_fleet(fleet)
+
+    def rename_profile(self, old_name: str, new_name: str) -> None:
+        """Updates all fleet devices referencing a given profile to the new name."""
+        with self._lock:
+            with open(self.fleet_file, 'r') as f:
+                fleet: List[Dict[str, Any]] = json.load(f)
+            changed = False
+            for d in fleet:
+                if d.get('profile') == old_name:
+                    d['profile'] = new_name
+                    changed = True
+            if changed:
+                self._write_fleet(fleet)

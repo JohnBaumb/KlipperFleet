@@ -238,8 +238,11 @@
                                     <button @click="saveProfile" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded text-sm font-bold flex items-center transition-colors">
                                         <i class="fas fa-save mr-2"></i> Save
                                     </button>
-                                    <button v-if="selectedProfile" @click="saveProfileAs" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded text-sm font-bold transition-colors" title="Save As...">
+                                    <button v-if="selectedProfile" @click="saveProfileAs" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded text-sm font-bold transition-colors" title="Duplicate Profile">
                                         <i class="fas fa-copy"></i>
+                                    </button>
+                                    <button v-if="selectedProfile" @click="renameProfile" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded text-sm font-bold transition-colors" title="Rename Profile">
+                                        <i class="fas fa-pen"></i>
                                     </button>
                                     <button v-if="selectedProfile" @click="deleteProfile" class="bg-red-900/50 hover:bg-red-700 text-red-200 px-3 py-2 rounded text-sm font-bold transition-colors" title="Delete Profile">
                                         <i class="fas fa-trash"></i>
@@ -431,11 +434,11 @@
                                     </div>
 
                                     <div class="mt-4 flex flex-wrap items-center gap-2">
-                                        <select v-model="dev.profile" @change="updateFleetDevice(dev)" class="mainsail-input text-xs p-1 rounded flex-1 min-w-[120px]">
+                                        <select v-model="dev.profile" @change="onDeviceProfileChange(dev)" class="mainsail-input text-xs p-1 rounded flex-1 min-w-[120px]">
                                             <option value="">-- Assign Profile --</option>
                                             <option v-for="p in profiles" :key="p" :value="p">{{ p }}</option>
                                         </select>
-                                        <select v-model="dev.method" @change="updateFleetDevice(dev)" class="mainsail-input text-[10px] p-1 rounded bg-gray-900 border-gray-700 text-gray-400 font-bold uppercase">
+                                        <select v-model="dev.method" @change="updateFleetDevice(dev)" :disabled="isProfileLinux(dev)" class="mainsail-input text-[10px] p-1 rounded bg-gray-900 border-gray-700 text-gray-400 font-bold uppercase disabled:opacity-50" :title="isProfileLinux(dev) ? 'Auto-selected: Profile uses Linux MCU architecture' : ''">
                                             <option value="serial">Serial</option>
                                             <option value="can">CAN</option>
                                             <option value="dfu">DFU</option>
@@ -459,13 +462,14 @@
                                     </div>
                                     <div class="mt-3 flex flex-wrap items-center justify-between gap-2">
                                         <div class="flex items-center space-x-4">
-                                            <label class="flex items-center space-x-2 cursor-pointer group">
+                                            <label v-if="!isProfileLinux(dev)" class="flex items-center space-x-2 cursor-pointer group">
                                                 <input type="checkbox" v-model="dev.is_katapult" @change="updateFleetDevice(dev)" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500">
                                                 <span class="text-[10px] text-gray-400 group-hover:text-gray-200 uppercase font-bold">Katapult</span>
                                             </label>
-                                            <label class="flex items-center space-x-2 cursor-pointer group">
-                                                <input type="checkbox" v-model="dev.is_bridge" @change="updateFleetDevice(dev)" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500">
+                                            <label v-if="!isProfileLinux(dev)" class="flex items-center space-x-2 cursor-pointer group" :class="{'opacity-60 cursor-not-allowed': isProfileCanBridge(dev)}">
+                                                <input type="checkbox" :checked="dev.is_bridge || isProfileCanBridge(dev)" @change="dev.is_bridge = $event.target.checked; updateFleetDevice(dev)" :disabled="isProfileCanBridge(dev)" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed">
                                                 <span class="text-[10px] text-gray-400 group-hover:text-gray-200 uppercase font-bold">CAN Bridge</span>
+                                                <span v-if="isProfileCanBridge(dev)" class="text-[8px] text-blue-400 font-bold">(auto)</span>
                                             </label>
                                         </div>
                                         <label class="flex items-center space-x-2 cursor-pointer group" title="This device will only be flashed when done individually. It will be skipped during Flash All, Build & Flash Ready, and Build & Flash All operations.">
@@ -745,6 +749,7 @@
                 const showRawSymbolNames = ref(localStorage.getItem('kf_show_raw_symbols') === 'true');
                 const showOptionalFeatures = ref(localStorage.getItem('kf_show_optional') === 'true');
                 const isKlipperKconfiglib = ref(true);
+                const profileInfo = ref({});
 
                 // Modal State
                 const modal = ref({
@@ -839,6 +844,48 @@
                     profiles.value = data.profiles;
                 };
 
+                const fetchProfileInfo = async () => {
+                    try {
+                        const res = await fetch('/profiles/info');
+                        profileInfo.value = await res.json();
+                        reconcileProfileFlags();
+                    } catch (e) {
+                        console.error("Failed to fetch profile info", e);
+                    }
+                };
+
+                const reconcileProfileFlags = () => {
+                    if (!fleet.value.length || !Object.keys(profileInfo.value).length) return;
+                    for (const dev of fleet.value) {
+                        const info = profileInfo.value[dev.profile];
+                        if (!info) continue;
+                        let needsUpdate = false;
+                        if (info.is_can_bridge && !dev.is_bridge) {
+                            dev.is_bridge = true;
+                            needsUpdate = true;
+                        }
+                        if (info.is_linux && dev.method !== 'linux') {
+                            dev.method = 'linux';
+                            needsUpdate = true;
+                        }
+                        if (needsUpdate) {
+                            fetch('/fleet/device', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(dev)
+                            }).catch(e => console.error("Failed to reconcile device", dev.name, e));
+                        }
+                    }
+                };
+
+                const isProfileCanBridge = (dev) => {
+                    return dev.profile && profileInfo.value[dev.profile]?.is_can_bridge;
+                };
+
+                const isProfileLinux = (dev) => {
+                    return dev.profile && profileInfo.value[dev.profile]?.is_linux;
+                };
+
                 const fetchFleet = async (fast = true) => {
                     querying.value = true;
                     try {
@@ -854,6 +901,9 @@
                         
                         // Fetch version info for devices
                         await fetchVersions();
+                        
+                        // Reconcile profile-driven flags (CAN bridge, Linux)
+                        reconcileProfileFlags();
                     } catch (e) {
                         console.error("Failed to fetch fleet", e);
                     } finally {
@@ -1003,6 +1053,7 @@
                     const isNew = !selectedProfile.value;
                     modifiedValues.value = {};
                     await fetchProfiles();
+                    await fetchProfileInfo();
                     selectedProfile.value = name;
                     loadProfile();
                     
@@ -1029,6 +1080,7 @@
                     
                     modifiedValues.value = {};
                     await fetchProfiles();
+                    await fetchProfileInfo();
                     selectedProfile.value = name;
                     loadProfile();
                 };
@@ -1050,7 +1102,34 @@
                     selectedProfile.value = '';
                     modifiedValues.value = {};
                     fetchProfiles();
+                    fetchProfileInfo();
                     fetchTree();
+                };
+
+                const renameProfile = async () => {
+                    if (!selectedProfile.value) return;
+                    const newName = await showPrompt("Rename Profile", `Enter new name for "${selectedProfile.value}":`, selectedProfile.value);
+                    if (!newName || newName === selectedProfile.value) return;
+
+                    try {
+                        const res = await fetch(`/profiles/${selectedProfile.value}/rename`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ new_name: newName })
+                        });
+                        if (!res.ok) {
+                            const data = await res.json();
+                            throw new Error(data.detail || 'Failed to rename profile');
+                        }
+
+                        selectedProfile.value = newName;
+                        await fetchProfiles();
+                        await fetchProfileInfo();
+                        await fetchFleet();
+                        loadProfile();
+                    } catch (e) {
+                        await showAlert("Error", "Error: " + e.message);
+                    }
                 };
 
                 const startBuild = async (profileName = null) => {
@@ -1443,6 +1522,19 @@
                     }
                 };
 
+                const onDeviceProfileChange = async (dev) => {
+                    const info = profileInfo.value[dev.profile];
+                    if (info) {
+                        if (info.is_can_bridge) {
+                            dev.is_bridge = true;
+                        }
+                        if (info.is_linux) {
+                            dev.method = 'linux';
+                        }
+                    }
+                    await updateFleetDevice(dev);
+                };
+
                 const removeDeviceFromFleet = async (id) => {
                     if (!await showConfirm("Remove Device", "Remove this device from your fleet?")) return;
                     try {
@@ -1508,7 +1600,7 @@
 
                 onMounted(() => {
                     fetchTree(selectedProfile.value);
-                    fetchProfiles();
+                    fetchProfiles().then(() => fetchProfileInfo());
                     fetchFleet();
                     fetchServices();
                     discoverDevices();
@@ -1564,10 +1656,10 @@
 
                 return { 
                     view, sidebarOpen, configTree, profiles, fleet, selectedProfile, loading, building, flashing, updating, querying,
-                    buildLogs, formattedLogs, expandLogs, expandLogsHeight, updateValue, saveProfile, saveProfileAs, newProfile, deleteProfile, loadProfile, createMissingProfile, startBuild, runBatch, selfUpdate,
+                    buildLogs, formattedLogs, expandLogs, expandLogsHeight, updateValue, saveProfile, saveProfileAs, newProfile, deleteProfile, renameProfile, loadProfile, createMissingProfile, startBuild, runBatch, selfUpdate,
                     devices, selectedDevice, discoverDevices, startFlash, quickFlash, quickBuild, quickFlashOnly, buildAndDownload, rebootDevice, statusColor, formatStatus,
-                    addDeviceToFleet, attachToFleet, updateFleetDevice, removeDeviceFromFleet, error, modifiedValues, formatNotes,
-                    mainsailUrl,
+                    addDeviceToFleet, attachToFleet, updateFleetDevice, onDeviceProfileChange, removeDeviceFromFleet, error, modifiedValues, formatNotes,
+                    mainsailUrl, profileInfo, isProfileCanBridge, isProfileLinux,
                     modal, showAlert, showConfirm, showPrompt, closeModal, testMagicBaud,
                     services, manageServices, cancelTask, currentTaskId,
                     showRawSymbolNames, showOptionalFeatures, isKlipperKconfiglib, firmwareName,
