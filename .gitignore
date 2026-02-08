@@ -16,6 +16,8 @@ out/
 Example/
 roadmap.md
 agents.md
+bugs.md
+.mailmap
 tests/
 scripts/
 .github/

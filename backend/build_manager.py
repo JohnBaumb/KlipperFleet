@@ -1,9 +1,13 @@
 import os
 import asyncio
+import logging
 import shutil
 import json
+import time
 from typing import AsyncGenerator, Dict, Any, Optional
 from asyncio.subprocess import Process
+
+logger = logging.getLogger("klipperfleet.build")
 
 class BuildManager:
     def __init__(self, klipper_dir: str, artifacts_dir: str) -> None:
@@ -11,6 +15,19 @@ class BuildManager:
         self.artifacts_dir: str = artifacts_dir
         self._last_build_info: Dict[str, Dict[str, Any]] = {}
         os.makedirs(self.artifacts_dir, exist_ok=True)
+        self._load_build_info_from_disk()
+
+    def _load_build_info_from_disk(self) -> None:
+        """Loads any saved .build_info.json files from the artifacts directory."""
+        try:
+            for filename in os.listdir(self.artifacts_dir):
+                if filename.endswith(".build_info.json"):
+                    profile_name = filename.replace(".build_info.json", "")
+                    filepath = os.path.join(self.artifacts_dir, filename)
+                    with open(filepath, "r") as f:
+                        self._last_build_info[profile_name] = json.load(f)
+        except Exception as e:
+            print(f"Warning: Could not load build info from disk: {e}")
 
     async def get_klipper_version(self) -> Dict[str, str]:
         """Gets the current Klipper git version info."""
@@ -95,14 +112,12 @@ class BuildManager:
             stderr=asyncio.subprocess.STDOUT
         )
 
+        assert process.stdout is not None
         while True:
-            if process.stdout:
-                line: bytes = await process.stdout.readline()
-                if not line:
-                    break
-                yield line.decode()
-            else:
+            line: bytes = await process.stdout.readline()
+            if not line:
                 break
+            yield line.decode()
 
         await process.wait()
         if process.returncode == 0:
@@ -124,7 +139,6 @@ class BuildManager:
                 yield f">>> Saved artifact: {profile_name}.elf\n"
             
             # Store build info for later retrieval
-            import time
             self._last_build_info[profile_name] = {
                 "version": version_info["version"],
                 "commit": version_info["commit"],
@@ -140,8 +154,9 @@ class BuildManager:
             yield f">>> Build failed with return code {process.returncode}\n"
 
     async def _run_command(self, cmd: list, timeout: int = 60) -> None:
+        process: Optional[Process] = None
         try:
-            process: Process = await asyncio.create_subprocess_exec(
+            process = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=self.klipper_dir,
                 stdout=asyncio.subprocess.DEVNULL,
@@ -149,8 +164,9 @@ class BuildManager:
             )
             await asyncio.wait_for(process.wait(), timeout=timeout)
         except asyncio.TimeoutError:
-            try:
-                process.kill()
-            except:
-                pass
+            if process is not None:
+                try:
+                    process.kill()
+                except Exception:
+                    logger.debug("Failed to kill timed-out process for %s (likely already exited)", ' '.join(cmd))
             raise Exception(f"Command {' '.join(cmd)} timed out after {timeout}s")

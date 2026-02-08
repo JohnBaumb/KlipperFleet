@@ -5,9 +5,14 @@ from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, AsyncGenerator
 import os
 import asyncio
+import logging
 import subprocess
 import sys
+import re
+import uuid
 from asyncio.subprocess import Process
+
+logger = logging.getLogger("klipperfleet")
 
 # Ensure the backend package directory is first on sys.path so local module
 # imports (kconfig_manager, build_manager, etc.) work whether uvicorn
@@ -26,7 +31,7 @@ except Exception:
     from flash_manager import FlashManager
     from fleet_manager import FleetManager
 
-app = FastAPI(title="KlipperFleet API", version="1.1.0-alpha")
+app = FastAPI(title="KlipperFleet API", version="1.1.1-alpha")
 
 # Configuration
 KLIPPER_DIR: str = os.path.abspath(os.path.expanduser(os.getenv("KLIPPER_DIR", "~/klipper")))
@@ -34,6 +39,42 @@ KATAPULT_DIR: str = os.path.abspath(os.path.expanduser(os.getenv("KATAPULT_DIR",
 DATA_DIR: str = os.path.abspath(os.path.expanduser(os.getenv("DATA_DIR", "~/printer_data/config/klipperfleet")))
 PROFILES_DIR: str = os.path.join(DATA_DIR, "profiles")
 ARTIFACTS_DIR: str = os.path.join(DATA_DIR, "artifacts")
+
+def _detect_firmware_name(firmware_dir: str) -> str:
+    """Detects whether the firmware directory contains Klipper or a fork (e.g. Kalico).
+    
+    Kalico clones into ~/klipper so we can't rely on directory name.
+    Detection order:
+    1. klippy/__init__.py APP_NAME (most reliable, Kalico sets APP_NAME = "Kalico")
+    2. Git remote URL (contains 'kalico')
+    3. Default to 'Klipper'
+    """
+    # Check klippy/__init__.py for APP_NAME
+    klippy_init: str = os.path.join(firmware_dir, "klippy", "__init__.py")
+    if os.path.exists(klippy_init):
+        try:
+            with open(klippy_init, 'r') as f:
+                for line in f:
+                    if line.strip().startswith("APP_NAME"):
+                        if "kalico" in line.lower():
+                            return "Kalico"
+                        break
+        except Exception:
+            pass
+    # Check git remote as a fallback
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=firmware_dir,
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0 and "kalico" in result.stdout.strip().lower():
+            return "Kalico"
+    except Exception:
+        pass
+    return "Klipper"
+
+FIRMWARE_NAME: str = _detect_firmware_name(KLIPPER_DIR)
 
 # Ensure directories exist
 os.makedirs(PROFILES_DIR, exist_ok=True)
@@ -43,6 +84,14 @@ kconfig_mgr = KconfigManager(KLIPPER_DIR)
 build_mgr = BuildManager(KLIPPER_DIR, ARTIFACTS_DIR)
 flash_mgr = FlashManager(KLIPPER_DIR, KATAPULT_DIR)
 fleet_mgr = FleetManager(DATA_DIR)
+
+# Profile name validation: only alphanumeric, underscores, hyphens, and dots
+_PROFILE_NAME_RE = re.compile(r'^[a-zA-Z0-9 _.-]+$')
+
+def validate_profile_name(name: str) -> None:
+    """Validates a profile name to prevent path traversal."""
+    if not name or not _PROFILE_NAME_RE.match(name) or '..' in name:
+        raise HTTPException(status_code=400, detail=f"Invalid profile name: '{name}'. Only alphanumeric characters, spaces, underscores, hyphens, and dots are allowed.")
 
 def get_flash_offset(profile_name: str) -> str:
     """Extracts the flash offset address from a profile's .config file."""
@@ -68,14 +117,29 @@ def get_flash_offset(profile_name: str) -> str:
                 if f"{key}=y" in content:
                     return addr
     except Exception:
-        pass
+        logger.warning("Failed to read config file %s for bootloader offset, using default", config_path, exc_info=True)
     return "0x08000000"
 
 class TaskStore:
+    MAX_COMPLETED_TASKS: int = 50
+
     def __init__(self) -> None:
-        self.tasks = {}
+        self.tasks: Dict[str, Dict[str, Any]] = {}
+
+    def _cleanup(self) -> None:
+        """Purge oldest completed tasks when the limit is exceeded."""
+        completed = [
+            (tid, t) for tid, t in self.tasks.items() if t.get("completed")
+        ]
+        if len(completed) <= self.MAX_COMPLETED_TASKS:
+            return
+        # Keep the most recent ones (dict insertion order is preserved in 3.7+)
+        to_remove = len(completed) - self.MAX_COMPLETED_TASKS
+        for tid, _ in completed[:to_remove]:
+            del self.tasks[tid]
 
     def create_task(self, task_id: str) -> None:
+        self._cleanup()
         self.tasks[task_id] = {
             "status": "running", 
             "logs": [], 
@@ -112,7 +176,7 @@ class TaskStore:
                 self.tasks[task_id]["status"] = status
             self.tasks[task_id]["completed"] = True
 
-    def get_task(self, task_id: str):
+    def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         return self.tasks.get(task_id)
 
 task_store = TaskStore()
@@ -125,6 +189,9 @@ class ProfileSave(BaseModel):
     name: str
     values: List[ConfigValue]
     base_profile: Optional[str] = None
+
+class ProfileRename(BaseModel):
+    new_name: str
 
 class Device(BaseModel):
     name: str
@@ -163,12 +230,19 @@ async def get_status() -> Dict[str, Any]:
     return {
         "message": "KlipperFleet API is running", 
         "klipper_dir": KLIPPER_DIR,
+        "firmware_name": FIRMWARE_NAME,
         "is_klipper_kconfiglib": kconfig_mgr.is_klipper_kconfiglib
     }
 
+@app.get("/api/print_status")
+async def get_print_status() -> Dict[str, Any]:
+    """Returns whether any printer is currently printing (via Moonraker)."""
+    return await flash_mgr.check_printer_printing()
+
 @app.get("/klipper/version")
+@app.get("/firmware/version")
 async def get_klipper_version() -> Dict[str, str]:
-    """Returns the host Klipper git version information."""
+    """Returns the host firmware (Klipper/Kalico) git version information."""
     return await build_mgr.get_klipper_version()
 
 class ConfigPreview(BaseModel):
@@ -186,20 +260,23 @@ async def post_config_tree(preview: ConfigPreview, request: Request) -> List[Dic
             raise HTTPException(status_code=404, detail=f"Profile {preview.profile} not found")
     
     try:
-        kconfig_mgr.load_kconfig(config_path)
+        await kconfig_mgr.load_kconfig(config_path)
         # Apply unsaved values in multiple passes to handle deep dependencies
         for i in range(10):
             for item in preview.values:
                 try:
                     kconfig_mgr.set_value(item.name, item.value)
                 except Exception:
-                    pass
+                    # Expected: values may fail on early passes due to unresolved dependencies.
+                    # They will succeed on later passes as cascading deps resolve.
+                    if i == 9:
+                        logger.debug("Kconfig value %s=%s still failing after final pass", item.name, item.value)
             
         return kconfig_mgr.get_menu_tree(show_optional=preview.show_optional)
     except FileNotFoundError:
         raise HTTPException(
             status_code=404, 
-            detail="Kconfig file not found. This is usually caused by a user running Kalico (unsupported but on the roadmap) or Klipper is not installed in the default location."
+            detail="Kconfig file not found. Ensure your firmware (Klipper/Kalico) is installed and KLIPPER_DIR is set correctly. Run 'echo $KLIPPER_DIR' to verify."
         )
     except Exception as e:
         import traceback
@@ -214,6 +291,9 @@ async def get_config_tree(request: Request, profile: Optional[str] = None, show_
 @app.post("/config/save")
 async def save_profile(profile: ProfileSave) -> Dict[str, str]:
     """Saves a set of configuration values to a profile file."""
+    validate_profile_name(profile.name)
+    if profile.base_profile:
+        validate_profile_name(profile.base_profile)
     try:
         config_path: Optional[str] = None
         if profile.base_profile:
@@ -221,9 +301,18 @@ async def save_profile(profile: ProfileSave) -> Dict[str, str]:
             if not os.path.exists(config_path):
                 config_path = None
         
-        kconfig_mgr.load_kconfig(config_path)
-        for item in profile.values:
-            kconfig_mgr.set_value(item.name, item.value)
+        await kconfig_mgr.load_kconfig(config_path)
+        # Apply values in multiple passes (matching the preview endpoint) to
+        # handle cascading 'select' dependencies, e.g. choosing a CAN bridge
+        # communication interface triggers select USBCANBUS which must resolve
+        # before save, otherwise the old value (USBSERIAL) persists.
+        for i in range(10):
+            for item in profile.values:
+                try:
+                    kconfig_mgr.set_value(item.name, item.value)
+                except Exception:
+                    if i == 9:
+                        logger.debug("Kconfig value %s=%s still failing after final save pass", item.name, item.value)
         
         save_path: str = os.path.join(PROFILES_DIR, f"{profile.name}.config")
         kconfig_mgr.save_config(save_path)
@@ -231,7 +320,7 @@ async def save_profile(profile: ProfileSave) -> Dict[str, str]:
     except FileNotFoundError:
         raise HTTPException(
             status_code=404, 
-            detail="Kconfig file not found. This is usually caused by a user running Kalico (unsupported but on the roadmap) or Klipper is not installed in the default location."
+            detail="Kconfig file not found. Ensure your firmware (Klipper/Kalico) is installed and KLIPPER_DIR is set correctly. Run 'echo $KLIPPER_DIR' to verify."
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -242,9 +331,30 @@ async def list_profiles() -> Dict[str, List[str]]:
     profiles: List[str] = [f.replace(".config", "") for f in os.listdir(PROFILES_DIR) if f.endswith(".config")]
     return {"profiles": profiles}
 
+@app.get("/profiles/info")
+async def get_profiles_info() -> Dict[str, Dict[str, bool]]:
+    """Returns metadata about all profiles (CAN bridge, Linux MCU detection)."""
+    info: Dict[str, Dict[str, bool]] = {}
+    for f in os.listdir(PROFILES_DIR):
+        if not f.endswith(".config"):
+            continue
+        name = f[:-7]  # Remove .config suffix
+        config_path = os.path.join(PROFILES_DIR, f)
+        try:
+            with open(config_path, 'r') as fh:
+                content = fh.read()
+                info[name] = {
+                    "is_can_bridge": "CONFIG_USBCANBUS=y" in content,
+                    "is_linux": "CONFIG_MACH_LINUX=y" in content
+                }
+        except Exception:
+            info[name] = {"is_can_bridge": False, "is_linux": False}
+    return info
+
 @app.delete("/profiles/{name}")
 async def delete_profile(name: str) -> Dict[str, str]:
     """Deletes a saved configuration profile."""
+    validate_profile_name(name)
     config_path: str = os.path.join(PROFILES_DIR, f"{name}.config")
     if os.path.exists(config_path):
         os.remove(config_path)
@@ -252,10 +362,43 @@ async def delete_profile(name: str) -> Dict[str, str]:
     else:
         raise HTTPException(status_code=404, detail=f"Profile {name} not found")
 
+@app.post("/profiles/{name}/rename")
+async def rename_profile(name: str, body: ProfileRename) -> Dict[str, str]:
+    """Renames a profile and updates all fleet device references."""
+    validate_profile_name(name)
+    validate_profile_name(body.new_name)
+    
+    if name == body.new_name:
+        return {"message": "Name unchanged"}
+    
+    old_path = os.path.join(PROFILES_DIR, f"{name}.config")
+    new_path = os.path.join(PROFILES_DIR, f"{body.new_name}.config")
+    
+    if not os.path.exists(old_path):
+        raise HTTPException(status_code=404, detail=f"Profile '{name}' not found")
+    if os.path.exists(new_path):
+        raise HTTPException(status_code=409, detail=f"Profile '{body.new_name}' already exists")
+    
+    # Rename the config file
+    os.rename(old_path, new_path)
+    
+    # Rename any matching artifacts (.bin, .elf)
+    for ext in [".bin", ".elf"]:
+        old_artifact = os.path.join(ARTIFACTS_DIR, f"{name}{ext}")
+        new_artifact = os.path.join(ARTIFACTS_DIR, f"{body.new_name}{ext}")
+        if os.path.exists(old_artifact):
+            os.rename(old_artifact, new_artifact)
+    
+    # Update fleet references
+    fleet_mgr.rename_profile(name, body.new_name)
+    
+    return {"message": f"Profile renamed from '{name}' to '{body.new_name}'"}
+
 @app.get("/build/{profile}")
 async def build_profile(profile: str) -> StreamingResponse:
     """Starts a build for the specified profile and streams the output."""
-    task_id: str = f"task_{int(asyncio.get_event_loop().time())}"
+    validate_profile_name(profile)
+    task_id: str = f"task_{uuid.uuid4().hex[:12]}"
     task_store.create_task(task_id)
 
     config_path: str = os.path.join(PROFILES_DIR, f"{profile}.config")
@@ -285,7 +428,7 @@ async def manage_klipper_services(action: str) -> str:
         target_services: List[str] = [s for s in services if s and s != "klipperfleet.service" and s.endswith(".service")]
         
         if not target_services:
-            return f">>> No Klipper/Moonraker services found to {action}.\n"
+            return f">>> No firmware/Moonraker services found to {action}.\n"
         
         for service in target_services:
             cmd: List[str] = ["sudo", "systemctl", action, service]
@@ -353,7 +496,7 @@ async def cancel_task_operation(task_id: str) -> Dict[str, str]:
 @app.get("/batch/{action}")
 async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dict[str, str]:
     """Performs batch operations (build, flash-ready, flash-all, etc.)"""
-    task_id: str = f"task_{int(asyncio.get_event_loop().time())}"
+    task_id: str = f"task_{uuid.uuid4().hex[:12]}"
     task_store.create_task(task_id)
 
     async def run_task() -> None:
@@ -381,7 +524,7 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                         async for log in build_mgr.run_build(config_path):
                             if task_store.is_cancelled(task_id): return
                             task_store.add_log(task_id, log)
-                            if "!!! Error" in log or "!!! Build failed" in log:
+                            if "!!! Error" in log or "Build failed" in log:
                                 build_success = False
                         build_results[profile] = "SUCCESS" if build_success else "FAILED"
                         task_store.add_log(task_id, f">>> BATCH BUILD: Finished {profile}\n")
@@ -389,6 +532,18 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
             # 2. Flash phase
             if "flash" in action:
                 if task_store.is_cancelled(task_id): return
+
+                # Safety: refuse to flash while a print is in progress
+                print_status = await flash_mgr.check_printer_printing()
+                if print_status["printing"]:
+                    task_store.add_log(
+                        task_id,
+                        f"\n!!! BATCH FLASH ABORTED: Printer is currently {print_status['state']}"
+                        f" (file: {print_status['filename']}). Cannot flash during a print.\n"
+                    )
+                    task_store.complete_task(task_id)
+                    return
+
                 task_store.tasks[task_id]["is_bus_task"] = True
                 task_store.add_log(task_id, "\n>>> BATCH FLASH: Starting...\n")
                 
@@ -932,7 +1087,16 @@ async def discover_devices() -> Dict[str, List[Dict[str, Any]]]:
 @app.post("/flash")
 async def flash_device(req: FlashRequest) -> StreamingResponse:
     """Flashes the specified profile to a device."""
-    task_id: str = f"task_{int(asyncio.get_event_loop().time())}"
+    # Safety: refuse to flash while a print is in progress
+    print_status = await flash_mgr.check_printer_printing()
+    if print_status["printing"]:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot flash while printing is in progress (state: {print_status['state']}, file: {print_status['filename']}). "
+                   "Wait for the print to finish or cancel it first."
+        )
+
+    task_id: str = f"task_{uuid.uuid4().hex[:12]}"
     task_store.create_task(task_id)
     task_store.tasks[task_id]["is_bus_task"] = True
 
@@ -964,7 +1128,8 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                         baudrate = d.get("baudrate", baudrate)
                         break
             except Exception:
-                pass
+                logger.warning("Failed to read fleet for device %s, using defaults (interface=%s, baudrate=%s)",
+                               req.device_id, interface, baudrate, exc_info=True)
 
             # Snapshot current serial devices BEFORE reboot (for diff-based detection)
             initial_serials: List[str] = [d['id'] for d in await flash_mgr.discover_serial_devices(skip_moonraker=True)]
@@ -1125,7 +1290,16 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
 @app.post("/flash/reboot")
 async def reboot_device(device_id: str, mode: str = "katapult", method: Optional[str] = None) -> StreamingResponse:
     """Reboots a device."""
-    task_id: str = f"task_{int(asyncio.get_event_loop().time())}"
+    # Safety: refuse to reboot while a print is in progress
+    print_status = await flash_mgr.check_printer_printing()
+    if print_status["printing"]:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot reboot devices while printing is in progress (state: {print_status['state']}, file: {print_status['filename']}). "
+                   "Wait for the print to finish or cancel it first."
+        )
+
+    task_id: str = f"task_{uuid.uuid4().hex[:12]}"
     task_store.create_task(task_id)
     task_store.tasks[task_id]["is_bus_task"] = True
 
@@ -1135,7 +1309,7 @@ async def reboot_device(device_id: str, mode: str = "katapult", method: Optional
     is_bridge = dev.get('is_bridge', False)
     
     # Use provided method or fall back to fleet entry or default to 'can'
-    actual_method: str | Any = method if method else dev.get('method', 'can')
+    actual_method: str = method if method else dev.get('method', 'can')
     interface = dev.get('interface', 'can0')
     
     async def generate() -> AsyncGenerator[str, None]:
@@ -1149,7 +1323,7 @@ async def reboot_device(device_id: str, mode: str = "katapult", method: Optional
 @app.post("/debug/test_magic_baud")
 async def test_magic_baud(device_id: str, full_cycle: bool = False) -> StreamingResponse:
     """Tests the 1200bps magic baud trick on a device, optionally testing the full cycle."""
-    task_id: str = f"task_{int(asyncio.get_event_loop().time())}"
+    task_id: str = f"task_{uuid.uuid4().hex[:12]}"
     task_store.create_task(task_id)
 
     async def generate() -> AsyncGenerator[str, None]:
@@ -1217,8 +1391,6 @@ async def test_magic_baud(device_id: str, full_cycle: bool = False) -> Streaming
             task_store.complete_task(task_id)
             
     return StreamingResponse(generate(), media_type="text/plain", headers={"X-Task-Id": task_id})
-            
-    return StreamingResponse(generate(), media_type="text/plain", headers={"X-Task-Id": task_id})
 
 @app.post("/api/self-update")
 async def self_update(background_tasks: BackgroundTasks) -> Dict[str, str]:
@@ -1228,10 +1400,13 @@ async def self_update(background_tasks: BackgroundTasks) -> Dict[str, str]:
         raise HTTPException(status_code=404, detail="Update script not found")
     
     try:
-        subprocess.check_call(["git", "fetch", "origin"], cwd=os.path.dirname(os.path.dirname(__file__)))
-        subprocess.check_call(["git", "reset", "--hard", "origin/main"], cwd=os.path.dirname(os.path.dirname(__file__)))
+        repo_dir = os.path.dirname(os.path.dirname(__file__))
+        fetch_proc = await asyncio.create_subprocess_exec("git", "fetch", "origin", cwd=repo_dir, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await fetch_proc.wait()
+        reset_proc = await asyncio.create_subprocess_exec("git", "reset", "--hard", "origin/main", cwd=repo_dir, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await reset_proc.wait()
     except Exception:
-        pass
+        logger.exception("Git fetch/reset failed during self-update, proceeding with update.sh anyway")
 
     def run_update() -> None:
         subprocess.Popen(["bash", update_script], start_new_session=True)

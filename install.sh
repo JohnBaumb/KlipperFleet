@@ -46,7 +46,6 @@ else
     KF_PATH="${USER_HOME}/KlipperFleet"
 fi
 
-KLIPPER_DIR="${USER_HOME}/klipper"
 MOONRAKER_CONFIG_DIR="${USER_HOME}/printer_data/config"
 KF_DATA_DIR="${MOONRAKER_CONFIG_DIR}/klipperfleet"
 
