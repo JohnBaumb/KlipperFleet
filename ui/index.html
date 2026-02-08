@@ -1065,11 +1065,16 @@
                     if (!name) return;
 
                     const values = Object.entries(modifiedValues.value).map(([name, value]) => ({ name, value }));
-                    await fetch('/config/save', {
+                    const saveRes = await fetch('/config/save', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ name, values, base_profile })
                     });
+                    if (!saveRes.ok) {
+                        const errData = await saveRes.json().catch(() => ({}));
+                        await showAlert('Save Failed', errData.detail || 'Failed to save profile.');
+                        return;
+                    }
                     
                     const isNew = !selectedProfile.value;
                     modifiedValues.value = {};

@@ -86,12 +86,12 @@ flash_mgr = FlashManager(KLIPPER_DIR, KATAPULT_DIR)
 fleet_mgr = FleetManager(DATA_DIR)
 
 # Profile name validation: only alphanumeric, underscores, hyphens, and dots
-_PROFILE_NAME_RE = re.compile(r'^[a-zA-Z0-9_.-]+$')
+_PROFILE_NAME_RE = re.compile(r'^[a-zA-Z0-9 _.-]+$')
 
 def validate_profile_name(name: str) -> None:
     """Validates a profile name to prevent path traversal."""
     if not name or not _PROFILE_NAME_RE.match(name) or '..' in name:
-        raise HTTPException(status_code=400, detail=f"Invalid profile name: '{name}'. Only alphanumeric characters, underscores, hyphens, and dots are allowed.")
+        raise HTTPException(status_code=400, detail=f"Invalid profile name: '{name}'. Only alphanumeric characters, spaces, underscores, hyphens, and dots are allowed.")
 
 def get_flash_offset(profile_name: str) -> str:
     """Extracts the flash offset address from a profile's .config file."""
@@ -302,8 +302,17 @@ async def save_profile(profile: ProfileSave) -> Dict[str, str]:
                 config_path = None
         
         await kconfig_mgr.load_kconfig(config_path)
-        for item in profile.values:
-            kconfig_mgr.set_value(item.name, item.value)
+        # Apply values in multiple passes (matching the preview endpoint) to
+        # handle cascading 'select' dependencies, e.g. choosing a CAN bridge
+        # communication interface triggers select USBCANBUS which must resolve
+        # before save, otherwise the old value (USBSERIAL) persists.
+        for i in range(10):
+            for item in profile.values:
+                try:
+                    kconfig_mgr.set_value(item.name, item.value)
+                except Exception:
+                    if i == 9:
+                        logger.debug("Kconfig value %s=%s still failing after final save pass", item.name, item.value)
         
         save_path: str = os.path.join(PROFILES_DIR, f"{profile.name}.config")
         kconfig_mgr.save_config(save_path)
