@@ -134,7 +134,7 @@ NAVI_JSON="${MOONRAKER_CONFIG_DIR}/.theme/navi.json"
 mkdir -p "${MOONRAKER_CONFIG_DIR}/.theme"
 
 # Icon: ship (M20,21V19L17,16H13V13H16V11H13V8H16V6H13V3H11V6H8V8H11V11H8V13H11V16H7L4,19V21H20Z)
-KF_ENTRY='{ "title": "KlipperFleet", "href": "http://'$(hostname -I | awk "{print \$1}")':8321", "target": "_self", "icon": "M20,21V19L17,16H13V13H16V11H13V8H16V6H13V3H11V6H8V8H11V11H8V13H11V16H7L4,19V21H20Z", "position": 86 }'
+KF_ENTRY='{ "title": "KlipperFleet", "href": "http://'$(hostname)':8321", "target": "_self", "icon": "M20,21V19L17,16H13V13H16V11H13V8H16V6H13V3H11V6H8V8H11V11H8V13H11V16H7L4,19V21H20Z", "position": 86 }'
 
 if [ ! -f "$NAVI_JSON" ]; then
     echo "KlipperFleet: Creating navi.json..."
