@@ -127,17 +127,19 @@ class FlashManager:
                     seen_real_paths.add(real_path)
 
             # Raw UART aliases/ports on SBCs (e.g. Raspberry Pi serial0/AMA/S ports)
-            # are shown when configured, and also as discoverable UART endpoints.
+            # are only shown when explicitly configured in Klipper/Moonraker.
+            # This avoids duplicate/noise entries like ttyS0 when serial0 is the real MCU path.
             elif (
                 dev.startswith("/dev/serial")
                 or dev.startswith("/dev/ttyAMA")
                 or dev.startswith("/dev/ttyS")
             ):
+                if not is_configured:
+                    continue
                 if real_path in seen_real_paths:
                     continue
-                mode = "service" if is_configured else "ready"
-                if is_configured:
-                    name = f"{configured_meta['name']} ({name})"
+                mode = "service"
+                name = f"{configured_meta['name']} ({name})"
                 devices.append({"id": dev, "name": name, "type": "uart", "mode": mode})
                 seen_real_paths.add(real_path)
 
