@@ -88,9 +88,17 @@ fi
 
 # Install Python dependencies
 echo "KlipperFleet: Installing Python dependencies from requirements.txt..."
-# Explicitly uninstall kconfiglib if present (migration to internal Klipper lib)
-sudo -u $USER "$KF_VENV/bin/pip" uninstall -y kconfiglib || true
 sudo -u $USER "$KF_VENV/bin/pip" install -r "${SRCDIR}/backend/requirements.txt"
+
+# Ensure kconfiglib is available for environments that require it
+echo "KlipperFleet: Checking for kconfiglib..."
+if sudo -u $USER "$KF_VENV/bin/python3" -c "import kconfiglib" >/dev/null 2>&1; then
+    echo "KlipperFleet: kconfiglib already installed."
+else
+    echo "KlipperFleet: kconfiglib not found. Installing..."
+    sudo -u $USER "$KF_VENV/bin/pip" install kconfiglib
+    echo "KlipperFleet: kconfiglib installed successfully."
+fi
 
 # 5. Setup Data Directories
 echo "KlipperFleet: Setting up data directories..."
@@ -134,24 +142,45 @@ NAVI_JSON="${MOONRAKER_CONFIG_DIR}/.theme/navi.json"
 mkdir -p "${MOONRAKER_CONFIG_DIR}/.theme"
 
 # Icon: ship (M20,21V19L17,16H13V13H16V11H13V8H16V6H13V3H11V6H8V8H11V11H8V13H11V16H7L4,19V21H20Z)
-KF_ENTRY='{ "title": "KlipperFleet", "href": "http://'$(hostname -I | awk "{print \$1}")':8321", "target": "_self", "icon": "M20,21V19L17,16H13V13H16V11H13V8H16V6H13V3H11V6H8V8H11V11H8V13H11V16H7L4,19V21H20Z", "position": 86 }'
-
+KF_HOSTNAME="$(hostname)"
 if [ ! -f "$NAVI_JSON" ]; then
     echo "KlipperFleet: Creating navi.json..."
-    echo "[ $KF_ENTRY ]" > "$NAVI_JSON"
-else
-    if ! grep -q '"KlipperFleet"' "$NAVI_JSON"; then
-        echo "KlipperFleet: Adding entry to navi.json..."
-        # Remove the closing bracket, add a comma and the new entry, then close it back up
-        sed -i '$d' "$NAVI_JSON"
-        # If the file is not just an empty array, add a comma
-        if [ "$(wc -l < "$NAVI_JSON")" -gt 0 ] || [ "$(wc -c < "$NAVI_JSON")" -gt 2 ]; then
-            echo "  ," >> "$NAVI_JSON"
-        fi
-        echo "  $KF_ENTRY" >> "$NAVI_JSON"
-        echo "]" >> "$NAVI_JSON"
-    fi
 fi
+
+python3 - "$NAVI_JSON" "$KF_HOSTNAME" << 'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+hostname = sys.argv[2]
+
+entry = {
+    "title": "KlipperFleet",
+    "href": f"http://{hostname}:8321",
+    "target": "_self",
+    "icon": "M20,21V19L17,16H13V13H16V11H13V8H16V6H13V3H11V6H8V8H11V11H8V13H11V16H7L4,19V21H20Z",
+    "position": 86
+}
+
+data = []
+if os.path.exists(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+            if isinstance(loaded, list):
+                data = loaded
+    except Exception:
+        data = []
+
+# Remove stale KlipperFleet entries, then append current one
+data = [item for item in data if not (isinstance(item, dict) and item.get("title") == "KlipperFleet")]
+data.append(entry)
+
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PY
 
 # 9. Systemd Service
 echo "KlipperFleet: Creating systemd service..."
