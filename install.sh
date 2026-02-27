@@ -134,24 +134,45 @@ NAVI_JSON="${MOONRAKER_CONFIG_DIR}/.theme/navi.json"
 mkdir -p "${MOONRAKER_CONFIG_DIR}/.theme"
 
 # Icon: ship (M20,21V19L17,16H13V13H16V11H13V8H16V6H13V3H11V6H8V8H11V11H8V13H11V16H7L4,19V21H20Z)
-KF_ENTRY='{ "title": "KlipperFleet", "href": "http://'$(hostname)':8321", "target": "_self", "icon": "M20,21V19L17,16H13V13H16V11H13V8H16V6H13V3H11V6H8V8H11V11H8V13H11V16H7L4,19V21H20Z", "position": 86 }'
-
+KF_HOSTNAME="$(hostname)"
 if [ ! -f "$NAVI_JSON" ]; then
     echo "KlipperFleet: Creating navi.json..."
-    echo "[ $KF_ENTRY ]" > "$NAVI_JSON"
-else
-    if ! grep -q '"KlipperFleet"' "$NAVI_JSON"; then
-        echo "KlipperFleet: Adding entry to navi.json..."
-        # Remove the closing bracket, add a comma and the new entry, then close it back up
-        sed -i '$d' "$NAVI_JSON"
-        # If the file is not just an empty array, add a comma
-        if [ "$(wc -l < "$NAVI_JSON")" -gt 0 ] || [ "$(wc -c < "$NAVI_JSON")" -gt 2 ]; then
-            echo "  ," >> "$NAVI_JSON"
-        fi
-        echo "  $KF_ENTRY" >> "$NAVI_JSON"
-        echo "]" >> "$NAVI_JSON"
-    fi
 fi
+
+python3 - "$NAVI_JSON" "$KF_HOSTNAME" << 'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+hostname = sys.argv[2]
+
+entry = {
+    "title": "KlipperFleet",
+    "href": f"http://{hostname}:8321",
+    "target": "_self",
+    "icon": "M20,21V19L17,16H13V13H16V11H13V8H16V6H13V3H11V6H8V8H11V11H8V13H11V16H7L4,19V21H20Z",
+    "position": 86
+}
+
+data = []
+if os.path.exists(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+            if isinstance(loaded, list):
+                data = loaded
+    except Exception:
+        data = []
+
+# Remove stale KlipperFleet entries, then append current one
+data = [item for item in data if not (isinstance(item, dict) and item.get("title") == "KlipperFleet")]
+data.append(entry)
+
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PY
 
 # 9. Systemd Service
 echo "KlipperFleet: Creating systemd service..."
