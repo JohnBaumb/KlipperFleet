@@ -37,6 +37,9 @@ class FlashManager:
         candidates: List[str] = (
             glob.glob("/dev/ttyACM*")
             + glob.glob("/dev/ttyUSB*")
+            + glob.glob("/dev/serial*")
+            + glob.glob("/dev/ttyAMA*")
+            + glob.glob("/dev/ttyS*")
             + ["/dev/serial0", "/dev/serial1", "/dev/ttyAMA0", "/dev/ttyAMA1", "/dev/ttyS0", "/dev/ttyS1"]
         )
         
@@ -137,6 +140,22 @@ class FlashManager:
                     name = f"{configured_meta['name']} ({name})"
                 devices.append({"id": dev, "name": name, "type": "uart", "mode": mode})
                 seen_real_paths.add(real_path)
+
+        # Final fallback: always include configured /dev serial endpoints from Moonraker,
+        # even if they were not discovered by glob/exists checks above.
+        known_ids = {d["id"] for d in devices}
+        for configured_id, meta in moonraker_mcus.items():
+            if not isinstance(configured_id, str) or not configured_id.startswith("/dev/"):
+                continue
+            cfg_id = os.path.abspath(configured_id)
+            if cfg_id in known_ids:
+                continue
+            cfg_real = os.path.realpath(cfg_id) if os.path.exists(cfg_id) else cfg_id
+            if cfg_real in seen_real_paths:
+                continue
+            cfg_name = f"{meta['name']} ({os.path.basename(cfg_id)})"
+            devices.append({"id": cfg_id, "name": cfg_name, "type": "uart", "mode": "service"})
+            seen_real_paths.add(cfg_real)
                 
         return devices
 
