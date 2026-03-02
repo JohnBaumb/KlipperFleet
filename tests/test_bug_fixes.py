@@ -605,5 +605,3 @@ class TestLinuxProcessFlash:
         assert executed_cmd[0] == "sudo"
         assert executed_cmd[1] == "-n"
         assert "cp" in executed_cmd
-
-
