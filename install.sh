@@ -89,16 +89,9 @@ fi
 # Install Python dependencies
 echo "KlipperFleet: Installing Python dependencies from requirements.txt..."
 sudo -u $USER "$KF_VENV/bin/pip" install -r "${SRCDIR}/backend/requirements.txt"
-
-# Ensure kconfiglib is available for environments that require it
-echo "KlipperFleet: Checking for kconfiglib..."
-if sudo -u $USER "$KF_VENV/bin/python3" -c "import kconfiglib" >/dev/null 2>&1; then
-    echo "KlipperFleet: kconfiglib already installed."
-else
-    echo "KlipperFleet: kconfiglib not found. Installing..."
-    sudo -u $USER "$KF_VENV/bin/pip" install kconfiglib
-    echo "KlipperFleet: kconfiglib installed successfully."
-fi
+# Explicitly uninstall pip kconfiglib in production installs.
+# KlipperFleet should prefer Klipper's bundled lib/kconfiglib at runtime.
+sudo -u $USER "$KF_VENV/bin/pip" uninstall -y kconfiglib || true
 
 # 5. Setup Data Directories
 echo "KlipperFleet: Setting up data directories..."
