@@ -91,6 +91,38 @@ echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="df11", MODE=
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 
+# Setup passwordless sudo for commands KlipperFleet needs at runtime
+# This is required on Ubuntu and other distros where the user doesn't have NOPASSWD by default.
+echo "KlipperFleet: Configuring sudoers for runtime commands..."
+SUDOERS_FILE="/etc/sudoers.d/klipperfleet"
+cat > "$SUDOERS_FILE" << SUDOERS_EOF
+# KlipperFleet: Allow the service user to manage klipper services and install firmware
+# without a password prompt (required for non-interactive service operation).
+$USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl start klipper*
+$USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop klipper*
+$USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart klipper*
+$USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl start moonraker*
+$USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop moonraker*
+$USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart moonraker*
+$USER ALL=(ALL) NOPASSWD: /bin/systemctl start klipper*
+$USER ALL=(ALL) NOPASSWD: /bin/systemctl stop klipper*
+$USER ALL=(ALL) NOPASSWD: /bin/systemctl restart klipper*
+$USER ALL=(ALL) NOPASSWD: /bin/systemctl start moonraker*
+$USER ALL=(ALL) NOPASSWD: /bin/systemctl stop moonraker*
+$USER ALL=(ALL) NOPASSWD: /bin/systemctl restart moonraker*
+$USER ALL=(ALL) NOPASSWD: /bin/cp * /usr/local/bin/klipper_mcu
+$USER ALL=(ALL) NOPASSWD: /usr/bin/cp * /usr/local/bin/klipper_mcu
+$USER ALL=(ALL) NOPASSWD: /bin/chmod +x /usr/local/bin/klipper_mcu
+$USER ALL=(ALL) NOPASSWD: /usr/bin/chmod +x /usr/local/bin/klipper_mcu
+$USER ALL=(ALL) NOPASSWD: /usr/bin/fuser *
+$USER ALL=(ALL) NOPASSWD: /bin/fuser *
+$USER ALL=(ALL) NOPASSWD: /sbin/ip link set can*
+$USER ALL=(ALL) NOPASSWD: /usr/sbin/ip link set can*
+$USER ALL=(ALL) NOPASSWD: /usr/bin/dfu-util *
+SUDOERS_EOF
+chmod 0440 "$SUDOERS_FILE"
+echo "KlipperFleet: Sudoers configured at $SUDOERS_FILE"
+
 # 4. Setup Python Virtual Environment
 log_info "Setting up Python virtual environment..."
 KF_VENV="${SRCDIR}/venv"

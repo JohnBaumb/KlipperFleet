@@ -93,6 +93,26 @@ def validate_profile_name(name: str) -> None:
     if not name or not _PROFILE_NAME_RE.match(name) or '..' in name:
         raise HTTPException(status_code=400, detail=f"Invalid profile name: '{name}'. Only alphanumeric characters, spaces, underscores, hyphens, and dots are allowed.")
 
+def resolve_firmware_path(profile_name: str, method: str) -> Optional[str]:
+    """Resolves the firmware file path for a given profile and flash method.
+    
+    AVR boards (e.g. ATmega2560) only produce .elf/.elf.hex, not .bin.
+    This function implements the correct fallback order:
+      - linux: .elf only
+      - other: .bin -> .elf (whichever exists)
+    Returns None if no firmware file is found.
+    """
+    if method == "linux":
+        path = os.path.join(ARTIFACTS_DIR, f"{profile_name}.elf")
+        return path if os.path.exists(path) else None
+    
+    # Prefer .bin (ARM/STM32 boards), fall back to .elf (AVR boards)
+    for ext in (".bin", ".elf"):
+        path = os.path.join(ARTIFACTS_DIR, f"{profile_name}{ext}")
+        if os.path.exists(path):
+            return path
+    return None
+
 def get_flash_offset(profile_name: str) -> str:
     """Extracts the flash offset address from a profile's .config file."""
     config_path: str = os.path.join(PROFILES_DIR, f"{profile_name}.config")
@@ -431,7 +451,7 @@ async def manage_klipper_services(action: str) -> str:
             return f">>> No firmware/Moonraker services found to {action}.\n"
         
         for service in target_services:
-            cmd: List[str] = ["sudo", "systemctl", action, service]
+            cmd: List[str] = ["sudo", "-n", "systemctl", action, service]
             proc: Process = await asyncio.create_subprocess_exec(*cmd)
             await proc.wait()
         
@@ -816,9 +836,9 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                             continue
 
                         task_store.add_log(task_id, f"\n>>> FLASHING {dev['name']} ({dev['id']}) with {dev['profile']}...\n")
-                        firmware_path: str = os.path.join(ARTIFACTS_DIR, f"{dev['profile']}.elf" if dev['method'] == "linux" else f"{dev['profile']}.bin")
+                        firmware_path: Optional[str] = resolve_firmware_path(dev['profile'], dev['method'])
                         
-                        if not os.path.exists(firmware_path):
+                        if firmware_path is None:
                             task_store.add_log(task_id, f"!!! Error: Firmware for {dev['profile']} not found. Skipping.\n")
                             flash_results[dev['name']] = "FAILED (no firmware)"
                             continue
@@ -906,17 +926,15 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
 
 @app.get("/download/{profile}")
 async def download_firmware(profile: str) -> FileResponse:
-    """Downloads the klipper.bin for the specified profile."""
-    bin_path: str = os.path.join(ARTIFACTS_DIR, f"{profile}.bin")
-    if not os.path.exists(bin_path):
-        bin_path: str = os.path.join(ARTIFACTS_DIR, f"{profile}.elf")
+    """Downloads the firmware binary for the specified profile."""
+    fw_path: Optional[str] = resolve_firmware_path(profile, "serial")  # serial triggers .bin->.elf fallback
         
-    if not os.path.exists(bin_path):
+    if fw_path is None:
         raise HTTPException(status_code=404, detail="Firmware binary not found. Please build first.")
     
-    ext: str = ".elf" if bin_path.endswith(".elf") else ".bin"
+    ext: str = os.path.splitext(fw_path)[1]
     return FileResponse(
-        path=bin_path, 
+        path=fw_path, 
         filename=f"{profile}{ext}",
         media_type='application/octet-stream'
     )
@@ -1100,12 +1118,8 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
     task_store.create_task(task_id)
     task_store.tasks[task_id]["is_bus_task"] = True
 
-    if req.method == "linux":
-        firmware_path: str = os.path.join(ARTIFACTS_DIR, f"{req.profile}.elf")
-    else:
-        firmware_path: str = os.path.join(ARTIFACTS_DIR, f"{req.profile}.bin")
-
-    if not os.path.exists(firmware_path):
+    firmware_path: Optional[str] = resolve_firmware_path(req.profile, req.method)
+    if firmware_path is None:
         raise HTTPException(status_code=400, detail=f"Firmware for profile '{req.profile}' not found. Please build first.")
     
     async def generate() -> AsyncGenerator[str, None]:
@@ -1141,7 +1155,11 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             
             # 2. Reboot if in service
             if status == "service":
-                if req.method == "dfu" or (req.method == "serial" and req.dfu_id):
+                if req.method == "linux":
+                    # Linux MCU doesn't need a reboot - services are already stopped
+                    # and the binary will be installed directly.
+                    yield ">>> Linux MCU: No reboot needed (binary install).\n"
+                elif req.method == "dfu" or (req.method == "serial" and req.dfu_id):
                     if req.use_magic_baud:
                         yield f">>> Rebooting {req.device_id} to DFU mode (Magic Baud)...\n"
                         async for log in flash_mgr.reboot_to_dfu(req.device_id):
@@ -1170,11 +1188,13 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                         if task_store.is_cancelled(task_id): return
                         yield log
                 
-                yield ">>> Waiting for device to enter bootloader mode...\n"
-                await asyncio.sleep(2) # Initial wait for USB bus to settle
+                if req.method != "linux":
+                    yield ">>> Waiting for device to enter bootloader mode...\n"
+                    await asyncio.sleep(2) # Initial wait for USB bus to settle
                 
                 # Active wait for bootloader (up to 30s) - check both DFU and new serial devices
-                for _ in range(30):
+                # (Skip entirely for Linux MCU - no bootloader transition needed)
+                for _ in range(30) if req.method != "linux" else []:
                     if task_store.is_cancelled(task_id): return
                     await asyncio.sleep(1)
                     

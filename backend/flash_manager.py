@@ -1104,45 +1104,55 @@ print(f"Jump command sent to UUID {device_id}")
             yield ">>> Flash operation complete.\n"
             self._dfu_cache_time = 0.0
 
+    async def _run_sudo_command(self, cmd: List[str]) -> tuple:
+        """Runs a command via sudo -n (non-interactive). Returns (returncode, output)."""
+        # Insert -n after sudo so it never blocks waiting for a password
+        if cmd and cmd[0] == "sudo" and "-n" not in cmd:
+            cmd = [cmd[0], "-n"] + cmd[1:]
+        process: Process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT
+        )
+        stdout, _ = await process.communicate()
+        return process.returncode, stdout.decode().strip()
+
     async def flash_linux(self, firmware_path: str) -> AsyncGenerator[str, None]:
         """'Flashes' the Linux process by installing the binary to /usr/local/bin/klipper_mcu."""
         yield f">>> Installing Linux MCU binary: {firmware_path}...\n"
         try:
-            # 1. Ensure service is stopped and file is not busy
-            stop_proc: Process = await asyncio.create_subprocess_exec(
-                "sudo", "systemctl", "stop", "klipper-mcu.service",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT
-            )
-            stop_out, _ = await stop_proc.communicate()
-            if stop_proc.returncode != 0:
-                yield f">>> WARNING: Could not stop klipper-mcu.service (rc={stop_proc.returncode}): {stop_out.decode().strip()}\n"
+            # 1. Stop klipper-mcu service if it's still running
+            # (manage_klipper_services usually handles this, but be safe)
+            rc, out = await self._run_sudo_command(["sudo", "systemctl", "stop", "klipper-mcu.service"])
+            if rc != 0 and "not loaded" not in out.lower():
+                yield f">>> WARNING: Could not stop klipper-mcu.service (rc={rc}): {out}\n"
+                if "password is required" in out.lower() or "a terminal is required" in out.lower():
+                    yield "!!! SUDO ERROR: Passwordless sudo is not configured for this user.\n"
+                    yield "!!! Please run: sudo visudo -f /etc/sudoers.d/klipperfleet\n"
+                    yield f"!!! Add: {os.environ.get('USER', 'pi')} ALL=(ALL) NOPASSWD: /usr/bin/systemctl, /bin/cp, /bin/chmod, /usr/bin/fuser\n"
+                    yield "!!! Or re-run the KlipperFleet installer (install.sh) which sets this up automatically.\n"
+                    return
             
             # Kill any remaining processes using the file
-            fuser_proc: Process = await asyncio.create_subprocess_exec(
-                "sudo", "fuser", "-k", "/usr/local/bin/klipper_mcu",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT
-            )
-            await fuser_proc.communicate()
-            await asyncio.sleep(2)
+            await self._run_sudo_command(["sudo", "fuser", "-k", "/usr/local/bin/klipper_mcu"])
+            await asyncio.sleep(1)
             
             # 2. Copy to /usr/local/bin/klipper_mcu
-            cmd: List[str] = ["sudo", "cp", firmware_path, "/usr/local/bin/klipper_mcu"]
-            process: Process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT
-            )
-            stdout, _ = await process.communicate()
-            if process.returncode != 0:
-                yield f"!!! Error copying binary: {stdout.decode()}\n"
+            rc, out = await self._run_sudo_command(["sudo", "cp", firmware_path, "/usr/local/bin/klipper_mcu"])
+            if rc != 0:
+                if "password is required" in out.lower() or "a terminal is required" in out.lower():
+                    yield "!!! SUDO ERROR: Passwordless sudo is not configured for this user.\n"
+                    yield "!!! Please run: sudo visudo -f /etc/sudoers.d/klipperfleet\n"
+                    yield f"!!! Add: {os.environ.get('USER', 'pi')} ALL=(ALL) NOPASSWD: /usr/bin/systemctl, /bin/cp, /bin/chmod, /usr/bin/fuser\n"
+                    yield "!!! Or re-run the KlipperFleet installer (install.sh) which sets this up automatically.\n"
+                else:
+                    yield f"!!! Error copying binary: {out}\n"
                 return
 
-            # 2. Ensure it's executable
-            cmd = ["sudo", "chmod", "+x", "/usr/local/bin/klipper_mcu"]
-            process = await asyncio.create_subprocess_exec(*cmd)
-            await process.wait()
+            # 3. Ensure it's executable
+            rc, out = await self._run_sudo_command(["sudo", "chmod", "+x", "/usr/local/bin/klipper_mcu"])
+            if rc != 0:
+                yield f">>> WARNING: chmod failed (rc={rc}): {out}\n"
 
             yield ">>> Linux MCU binary installed successfully.\n"
         except Exception as e:

@@ -103,10 +103,11 @@ class BuildManager:
             yield f"!!! Error during make olddefconfig: {str(e)}\n"
             return
 
-        # 3. Build
-        yield ">>> Starting build...\n"
+        # 3. Build (use all available CPU cores for faster compilation)
+        nproc = os.cpu_count() or 1
+        yield f">>> Starting build (-j{nproc})...\n"
         process: Process = await asyncio.create_subprocess_exec(
-            "make",
+            "make", f"-j{nproc}",
             cwd=self.klipper_dir,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT
@@ -130,6 +131,7 @@ class BuildManager:
             # Copy artifacts to persistent storage
             bin_src: str = os.path.join(self.klipper_dir, "out", "klipper.bin")
             elf_src: str = os.path.join(self.klipper_dir, "out", "klipper.elf")
+            hex_src: str = os.path.join(self.klipper_dir, "out", "klipper.elf.hex")
             
             if os.path.exists(bin_src):
                 shutil.copy(bin_src, os.path.join(self.artifacts_dir, f"{profile_name}.bin"))
@@ -137,6 +139,9 @@ class BuildManager:
             if os.path.exists(elf_src):
                 shutil.copy(elf_src, os.path.join(self.artifacts_dir, f"{profile_name}.elf"))
                 yield f">>> Saved artifact: {profile_name}.elf\n"
+            if os.path.exists(hex_src):
+                shutil.copy(hex_src, os.path.join(self.artifacts_dir, f"{profile_name}.elf.hex"))
+                yield f">>> Saved artifact: {profile_name}.elf.hex\n"
             
             # Store build info for later retrieval
             self._last_build_info[profile_name] = {
