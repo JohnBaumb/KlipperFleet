@@ -32,15 +32,13 @@ class FlashManager:
         usb_devs: List[str] = glob.glob("/dev/serial/by-id/*")
         
         # 2. Common UART and CDC-ACM devices
-        # We include /dev/ttyACM* and /dev/ttyUSB* because some devices (especially in Katapult)
-        # might not immediately get a by-id link or might be generic.
+        # Keep globs tight to avoid matching /dev/serial/ directories and by-id trees.
         candidates: List[str] = (
             glob.glob("/dev/ttyACM*")
             + glob.glob("/dev/ttyUSB*")
-            + glob.glob("/dev/serial*")
-            + glob.glob("/dev/ttyAMA*")
-            + glob.glob("/dev/ttyS*")
-            + ["/dev/serial0", "/dev/serial1", "/dev/ttyAMA0", "/dev/ttyAMA1", "/dev/ttyS0", "/dev/ttyS1"]
+            + glob.glob("/dev/serial[0-9]*")
+            + glob.glob("/dev/ttyAMA[0-9]*")
+            + glob.glob("/dev/ttyS[0-9]*")
         )
         
         moonraker_mcus: Dict[str, Dict[str, str]] = {}
