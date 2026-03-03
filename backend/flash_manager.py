@@ -996,6 +996,50 @@ print(f"Jump command sent to UUID {device_id}")
         async for line in self._run_flash_command(cmd):
             yield line
 
+    async def flash_avr(self, device_id: str, firmware_path: str, config_path: str) -> AsyncGenerator[str, None]:
+        """Flashes an AVR device (e.g. ATmega2560) using Klipper's 'make flash'.
+
+        This delegates to Klipper's Makefile which knows the correct avrdude
+        parameters (MCU type, programmer, baud rate) from the Kconfig profile.
+        The .config is copied into the klipper directory so 'make flash' picks
+        up the right board settings.
+        """
+        import shutil
+        yield f">>> Flashing AVR device {device_id} via avrdude (make flash)...\n"
+
+        # Copy the profile .config into the klipper directory so make flash
+        # uses the correct board settings (MCU type, programmer, etc.).
+        tmp_config: str = os.path.join(self.klipper_dir, ".config")
+        try:
+            shutil.copy(config_path, tmp_config)
+        except Exception as e:
+            yield f"!!! Error copying profile config: {e}\n"
+            return
+
+        # Ensure the firmware in out/ is up to date for this profile.
+        # 'make flash' will rebuild only if necessary.
+        yield f">>> Running make flash FLASH_DEVICE={device_id}...\n"
+        process: Process = await asyncio.create_subprocess_exec(
+            "make", "flash", f"FLASH_DEVICE={device_id}",
+            cwd=self.klipper_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT
+        )
+
+        while True:
+            if process.stdout is None:
+                break
+            chunk: bytes = await process.stdout.read(128)
+            if not chunk:
+                break
+            yield chunk.decode(errors='replace')
+
+        await process.wait()
+        if process.returncode == 0:
+            yield ">>> AVR flash successful!\n"
+        else:
+            yield f">>> AVR flash failed with return code {process.returncode}\n"
+
     async def flash_can(self, uuid: str, firmware_path: str, interface: str = "can0") -> AsyncGenerator[str, None]:
         """Flashes a device via CAN using Katapult."""
         async with self._can_lock:

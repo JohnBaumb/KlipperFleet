@@ -113,6 +113,19 @@ def resolve_firmware_path(profile_name: str, method: str) -> Optional[str]:
             return path
     return None
 
+def is_avr_profile(profile_name: str) -> bool:
+    """Check if a profile targets an AVR microcontroller (e.g. ATmega2560).
+    
+    Reads the profile's .config and looks for CONFIG_MACH_AVR=y.
+    Returns False if the config can't be read.
+    """
+    config_path = os.path.join(PROFILES_DIR, f"{profile_name}.config")
+    try:
+        with open(config_path, 'r') as f:
+            return "CONFIG_MACH_AVR=y" in f.read()
+    except Exception:
+        return False
+
 def get_flash_offset(profile_name: str) -> str:
     """Extracts the flash offset address from a profile's .config file."""
     config_path: str = os.path.join(PROFILES_DIR, f"{profile_name}.config")
@@ -365,10 +378,11 @@ async def get_profiles_info() -> Dict[str, Dict[str, bool]]:
                 content = fh.read()
                 info[name] = {
                     "is_can_bridge": "CONFIG_USBCANBUS=y" in content,
-                    "is_linux": "CONFIG_MACH_LINUX=y" in content
+                    "is_linux": "CONFIG_MACH_LINUX=y" in content,
+                    "is_avr": "CONFIG_MACH_AVR=y" in content
                 }
         except Exception:
-            info[name] = {"is_can_bridge": False, "is_linux": False}
+            info[name] = {"is_can_bridge": False, "is_linux": False, "is_avr": False}
     return info
 
 @app.delete("/profiles/{name}")
@@ -577,6 +591,14 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                         flash_results[excl_dev['name']] = "EXCLUDED"
                 
                 task_store.add_log(task_id, ">>> Checking device statuses before stopping services...\n")
+
+                # Auto-detect AVR profiles and override is_katapult for devices that target AVR MCUs.
+                # This ensures AVR devices (e.g. ATmega2560) are never sent through the Katapult path,
+                # even if the user hasn't explicitly set is_katapult: false in the fleet.
+                for dev in devices:
+                    if dev.get('profile') and is_avr_profile(dev['profile']):
+                        dev['is_katapult'] = False
+
                 # Pre-discover CAN devices while Moonraker is still running to identify "In Service" nodes
                 can_discovery: List[Dict[str, str]] = await flash_mgr.discover_can_devices()
                 can_status_map: Dict[str, str] = {d['id']: d.get('mode', 'offline') for d in can_discovery}
@@ -598,10 +620,15 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                     task_store.update_device_status(task_id, dev['id'], status)
                     
                     if status == "service":
-                        # Reboot non-bridge CAN devices and non-bridge Katapult-capable serial devices.
+                        # Reboot non-bridge devices that need bootloader entry.
+                        # Skip serial devices without Katapult (e.g. AVR boards) — they flash directly.
                         # Bridges are handled in the second phase to avoid killing the CAN bus prematurely.
-                        # We also include serial devices if they are being flashed, as they MUST be in Katapult mode.
-                        if not dev.get('is_bridge') and (dev['method'] == 'can' or dev['method'] == 'serial' or dev['method'] == 'dfu'):
+                        needs_reboot = (
+                            not dev.get('is_bridge')
+                            and dev['method'] in ('can', 'serial', 'dfu')
+                            and not (dev['method'] == 'serial' and not dev.get('is_katapult', True))
+                        )
+                        if needs_reboot:
                             reboot_tasks.append({
                                 "original_id": dev['id'], # Keep the original ID to find it in the devices list
                                 "id": dev['id'], 
@@ -830,7 +857,9 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                                     flash_results[dev['name']] = "FAILED (Katapult timeout)"
                                     continue
 
-                        if status not in ["ready", "dfu"] and dev['method'] != "linux":
+                        # Non-Katapult serial devices (e.g. AVR) flash directly without bootloader
+                        is_direct_serial = dev['method'] == 'serial' and not dev.get('is_katapult', True)
+                        if status not in ["ready", "dfu"] and dev['method'] != "linux" and not is_direct_serial:
                             task_store.add_log(task_id, f"!!! Skipping {dev['name']} ({dev['id']}) - Device is {status}, not ready for flashing.\n")
                             flash_results[dev['name']] = f"SKIPPED ({status})"
                             continue
@@ -845,7 +874,13 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                             
                         task_store.update_device_status(task_id, dev['id'], "flashing")
                         try:
-                            if dev['method'] == "serial":
+                            if dev['method'] == "serial" and not dev.get('is_katapult', True):
+                                # AVR / non-Katapult serial device — flash via avrdude (make flash)
+                                config_path: str = os.path.join(PROFILES_DIR, f"{dev['profile']}.config")
+                                async for log in flash_mgr.flash_avr(dev['id'], firmware_path, config_path):
+                                    if task_store.is_cancelled(task_id): return
+                                    task_store.add_log(task_id, log)
+                            elif dev['method'] == "serial":
                                 # Resolve ID in case it changed during reboot (e.g. Klipper -> Katapult)
                                 resolved_id: str = await flash_mgr.resolve_serial_id(dev['id'])
                                 if resolved_id != dev['id']:
@@ -1131,19 +1166,25 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             yield await manage_klipper_services("stop")
             services_stopped = True
 
-            # Query the fleet to determine the interface and baudrate for this device
+            # Query the fleet to determine the interface, baudrate, and katapult setting for this device
             interface = "can0"
             baudrate = req.baudrate if req.baudrate else 250000
+            is_katapult = True  # Default to True for backward compatibility
             try:
                 fleet = fleet_mgr.get_fleet()
                 for d in fleet:
                     if d.get("id") == req.device_id:
                         interface = d.get("interface", interface)
                         baudrate = d.get("baudrate", baudrate)
+                        is_katapult = d.get("is_katapult", True)
                         break
             except Exception:
                 logger.warning("Failed to read fleet for device %s, using defaults (interface=%s, baudrate=%s)",
                                req.device_id, interface, baudrate, exc_info=True)
+
+            # Auto-detect AVR from profile — override is_katapult if profile targets AVR
+            if is_avr_profile(req.profile):
+                is_katapult = False
 
             # Snapshot current serial devices BEFORE reboot (for diff-based detection)
             initial_serials: List[str] = [d['id'] for d in await flash_mgr.discover_serial_devices(skip_moonraker=True)]
@@ -1182,19 +1223,24 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                         if not found:
                             yield "!!! TIMEOUT: DFU device not found. Aborting flash.\n"
                             return
+                elif req.method == "serial" and not is_katapult:
+                    # Non-Katapult serial device (e.g. AVR/ATmega) — no reboot needed.
+                    # Services are already stopped; avrdude will flash directly.
+                    yield f">>> Serial device (no Katapult): Skipping bootloader reboot for {req.device_id}.\n"
                 else:
                     yield f">>> Rebooting {req.device_id} to Katapult mode...\n"
                     async for log in flash_mgr.reboot_to_katapult(req.device_id, method=req.method, baudrate=baudrate):
                         if task_store.is_cancelled(task_id): return
                         yield log
                 
-                if req.method != "linux":
+                if req.method != "linux" and not (req.method == "serial" and not is_katapult):
                     yield ">>> Waiting for device to enter bootloader mode...\n"
                     await asyncio.sleep(2) # Initial wait for USB bus to settle
                 
                 # Active wait for bootloader (up to 30s) - check both DFU and new serial devices
-                # (Skip entirely for Linux MCU - no bootloader transition needed)
-                for _ in range(30) if req.method != "linux" else []:
+                # (Skip entirely for Linux MCU and non-Katapult serial devices - no bootloader transition needed)
+                skip_bootloader_wait = req.method == "linux" or (req.method == "serial" and not is_katapult)
+                for _ in range(30) if not skip_bootloader_wait else []:
                     if task_store.is_cancelled(task_id): return
                     await asyncio.sleep(1)
                     
@@ -1270,7 +1316,13 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             # 4. Flash
             task_store.update_device_status(task_id, req.device_id, "flashing")
             try:
-                if actual_method == "serial":
+                if actual_method == "serial" and not is_katapult:
+                    # AVR / non-Katapult serial device — flash via avrdude (make flash)
+                    config_path: str = os.path.join(PROFILES_DIR, f"{req.profile}.config")
+                    async for log in flash_mgr.flash_avr(target_id, firmware_path, config_path):
+                        if task_store.is_cancelled(task_id): return
+                        yield log
+                elif actual_method == "serial":
                     async for log in flash_mgr.flash_serial(target_id, firmware_path, baudrate=baudrate):
                         if task_store.is_cancelled(task_id): return
                         yield log

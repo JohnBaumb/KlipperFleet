@@ -83,7 +83,7 @@ chmod +x *.sh
 
 # 3. Install System Dependencies
 log_info "Installing system dependencies..."
-apt-get update && apt-get install -y python3-venv python3-pip git dfu-util
+apt-get update && apt-get install -y python3-venv python3-pip git dfu-util avrdude
 
 # Setup udev rules for DFU devices
 log_info "Setting up udev rules for DFU devices..."

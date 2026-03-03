@@ -605,3 +605,255 @@ class TestLinuxProcessFlash:
         assert executed_cmd[0] == "sudo"
         assert executed_cmd[1] == "-n"
         assert "cp" in executed_cmd
+
+
+# ---------------------------------------------------------------------------
+# AVR Flash Support (non-Katapult serial devices)
+# ---------------------------------------------------------------------------
+
+
+class TestAvrDeviceFlash:
+    """Tests for AVR (non-Katapult) serial device flashing via avrdude/make flash."""
+
+    @pytest.mark.asyncio
+    async def test_flash_avr_copies_config_and_runs_make_flash(self):
+        """flash_avr should copy the profile config then run make flash FLASH_DEVICE=<path>."""
+        mgr = FlashManager("/tmp/klipper", "/tmp/katapult")
+
+        executed_cmds = []
+
+        async def mock_subprocess(*args, **kwargs):
+            executed_cmds.append(list(args))
+            proc = MagicMock()
+            proc.stdout = AsyncMock()
+            proc.stdout.read = AsyncMock(return_value=b"")
+            proc.wait = AsyncMock(return_value=None)
+            proc.returncode = 0
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=mock_subprocess), \
+             patch("shutil.copy") as mock_copy:
+            logs = []
+            async for line in mgr.flash_avr(
+                "/dev/serial/by-id/usb-FTDI_FT232R-if00-port0",
+                "/tmp/artifacts/2560.elf",
+                "/tmp/profiles/2560.config"
+            ):
+                logs.append(line)
+
+        combined = "".join(logs)
+        # Config should be copied to klipper/.config
+        mock_copy.assert_called_once_with("/tmp/profiles/2560.config", os.path.join("/tmp/klipper", ".config"))
+        # make flash should be called with FLASH_DEVICE
+        assert len(executed_cmds) == 1
+        cmd = executed_cmds[0]
+        assert "make" in cmd
+        assert "flash" in cmd
+        assert any("FLASH_DEVICE=" in arg for arg in cmd)
+        assert "AVR flash successful" in combined
+
+    @pytest.mark.asyncio
+    async def test_flash_avr_reports_failure(self):
+        """flash_avr should report failure when make flash returns non-zero."""
+        mgr = FlashManager("/tmp/klipper", "/tmp/katapult")
+
+        async def mock_subprocess(*args, **kwargs):
+            proc = MagicMock()
+            proc.stdout = AsyncMock()
+            proc.stdout.read = AsyncMock(return_value=b"")
+            proc.wait = AsyncMock(return_value=None)
+            proc.returncode = 1
+            return proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=mock_subprocess), \
+             patch("shutil.copy"):
+            logs = []
+            async for line in mgr.flash_avr(
+                "/dev/serial/by-id/test",
+                "/tmp/artifacts/2560.elf",
+                "/tmp/profiles/2560.config"
+            ):
+                logs.append(line)
+
+        combined = "".join(logs)
+        assert "AVR flash failed" in combined
+
+    @pytest.mark.asyncio
+    async def test_flash_avr_handles_config_copy_error(self):
+        """flash_avr should yield an error if the config file cannot be copied."""
+        mgr = FlashManager("/tmp/klipper", "/tmp/katapult")
+
+        with patch("shutil.copy", side_effect=FileNotFoundError("No such file")):
+            logs = []
+            async for line in mgr.flash_avr(
+                "/dev/serial/by-id/test",
+                "/tmp/artifacts/2560.elf",
+                "/tmp/profiles/missing.config"
+            ):
+                logs.append(line)
+
+        combined = "".join(logs)
+        assert "Error copying profile config" in combined
+
+    def test_batch_reboot_skips_non_katapult_serial(self):
+        """In batch flash, serial devices without Katapult should NOT be added to reboot_tasks."""
+        # Simulates the reboot_tasks logic from main.py batch flash
+        devices = [
+            {"id": "avr-device", "method": "serial", "name": "AVR Board", "is_katapult": False, "is_bridge": False},
+            {"id": "stm-device", "method": "serial", "name": "STM Board", "is_katapult": True, "is_bridge": False},
+            {"id": "can-device", "method": "can", "name": "CAN Board", "is_bridge": False},
+        ]
+
+        reboot_tasks = []
+        for dev in devices:
+            needs_reboot = (
+                not dev.get('is_bridge')
+                and dev['method'] in ('can', 'serial', 'dfu')
+                and not (dev['method'] == 'serial' and not dev.get('is_katapult', True))
+            )
+            if needs_reboot:
+                reboot_tasks.append(dev['id'])
+
+        # AVR device should NOT be rebooted
+        assert "avr-device" not in reboot_tasks
+        # STM (Katapult) device should be rebooted
+        assert "stm-device" in reboot_tasks
+        # CAN device should be rebooted
+        assert "can-device" in reboot_tasks
+
+    def test_batch_status_allows_direct_serial_flash(self):
+        """Non-Katapult serial devices should NOT be skipped when status is 'service'."""
+        # Simulates the status guard from main.py batch flash
+        dev_katapult = {"method": "serial", "is_katapult": True}
+        dev_avr = {"method": "serial", "is_katapult": False}
+        dev_linux = {"method": "linux"}
+
+        def should_skip(dev, status):
+            is_direct_serial = dev['method'] == 'serial' and not dev.get('is_katapult', True)
+            return status not in ["ready", "dfu"] and dev['method'] != "linux" and not is_direct_serial
+
+        # AVR in "service" status should NOT be skipped (flashes directly)
+        assert not should_skip(dev_avr, "service")
+        # Katapult serial in "service" status SHOULD be skipped (needs bootloader)
+        assert should_skip(dev_katapult, "service")
+        # Linux is never skipped
+        assert not should_skip(dev_linux, "service")
+
+    def test_is_katapult_defaults_true(self):
+        """Devices without explicit is_katapult should default to True (backward compatibility)."""
+        dev_no_flag = {"method": "serial"}
+        dev_true = {"method": "serial", "is_katapult": True}
+        dev_false = {"method": "serial", "is_katapult": False}
+
+        assert dev_no_flag.get('is_katapult', True) is True
+        assert dev_true.get('is_katapult', True) is True
+        assert dev_false.get('is_katapult', True) is False
+
+
+# ---------------------------------------------------------------------------
+# AVR auto-detection from profile config
+# ---------------------------------------------------------------------------
+
+
+class TestAvrProfileAutoDetection:
+    """Tests that AVR profiles are auto-detected from Kconfig, overriding is_katapult."""
+
+    def test_is_avr_profile_detects_avr(self, tmp_path):
+        """is_avr_profile returns True when profile has CONFIG_MACH_AVR=y."""
+        from backend.main import PROFILES_DIR
+        config = tmp_path / "atmega2560.config"
+        config.write_text("CONFIG_MACH_AVR=y\nCONFIG_AVR_FREQ_16000000=y\n")
+
+        with patch("backend.main.PROFILES_DIR", str(tmp_path)):
+            from backend.main import is_avr_profile
+            assert is_avr_profile("atmega2560") is True
+
+    def test_is_avr_profile_rejects_stm32(self, tmp_path):
+        """is_avr_profile returns False for an STM32 profile."""
+        config = tmp_path / "spider.config"
+        config.write_text("CONFIG_MACH_STM32=y\nCONFIG_STM32_SELECT=y\n")
+
+        with patch("backend.main.PROFILES_DIR", str(tmp_path)):
+            from backend.main import is_avr_profile
+            assert is_avr_profile("spider") is False
+
+    def test_is_avr_profile_missing_file(self, tmp_path):
+        """is_avr_profile returns False if config file doesn't exist."""
+        with patch("backend.main.PROFILES_DIR", str(tmp_path)):
+            from backend.main import is_avr_profile
+            assert is_avr_profile("nonexistent") is False
+
+    def test_single_flash_overrides_katapult_for_avr(self, tmp_path):
+        """In single-flash path, is_katapult should be overridden to False for AVR profiles."""
+        # Simulate the logic from the single-flash endpoint
+        config = tmp_path / "mega.config"
+        config.write_text("CONFIG_MACH_AVR=y\n")
+
+        with patch("backend.main.PROFILES_DIR", str(tmp_path)):
+            from backend.main import is_avr_profile
+
+            # Default from fleet (no explicit setting)
+            is_katapult = True
+            profile = "mega"
+            if is_avr_profile(profile):
+                is_katapult = False
+
+            assert is_katapult is False
+
+    def test_single_flash_keeps_katapult_for_stm32(self, tmp_path):
+        """In single-flash path, is_katapult should remain True for non-AVR profiles."""
+        config = tmp_path / "spider.config"
+        config.write_text("CONFIG_MACH_STM32=y\n")
+
+        with patch("backend.main.PROFILES_DIR", str(tmp_path)):
+            from backend.main import is_avr_profile
+
+            is_katapult = True
+            profile = "spider"
+            if is_avr_profile(profile):
+                is_katapult = False
+
+            assert is_katapult is True
+
+    def test_batch_normalizes_katapult_for_avr_devices(self, tmp_path):
+        """In batch flash, devices with AVR profiles should have is_katapult set to False."""
+        config = tmp_path / "2560.config"
+        config.write_text("CONFIG_MACH_AVR=y\nCONFIG_MCU=atmega2560\n")
+        stm_config = tmp_path / "spider.config"
+        stm_config.write_text("CONFIG_MACH_STM32=y\n")
+
+        devices = [
+            {"id": "avr-dev", "method": "serial", "profile": "2560", "name": "AVR"},
+            {"id": "stm-dev", "method": "serial", "profile": "spider", "name": "STM", "is_katapult": True},
+            {"id": "no-profile", "method": "serial", "profile": "", "name": "Empty"},
+        ]
+
+        with patch("backend.main.PROFILES_DIR", str(tmp_path)):
+            from backend.main import is_avr_profile
+            # Replicate the batch normalization loop
+            for dev in devices:
+                if dev.get('profile') and is_avr_profile(dev['profile']):
+                    dev['is_katapult'] = False
+
+        # AVR device should have is_katapult forced False
+        assert devices[0].get('is_katapult') is False
+        # STM device should be unchanged
+        assert devices[1].get('is_katapult') is True
+        # No-profile device should be unchanged (no key set)
+        assert 'is_katapult' not in devices[2]
+
+    def test_profiles_info_includes_is_avr(self, tmp_path):
+        """get_profiles_info should include is_avr in profile metadata."""
+        avr_config = tmp_path / "mega.config"
+        avr_config.write_text("CONFIG_MACH_AVR=y\n")
+        stm_config = tmp_path / "spider.config"
+        stm_config.write_text("CONFIG_MACH_STM32=y\nCONFIG_USBCANBUS=y\n")
+
+        with patch("backend.main.PROFILES_DIR", str(tmp_path)):
+            from backend.main import get_profiles_info
+            info = asyncio.get_event_loop().run_until_complete(get_profiles_info())
+
+        assert info["mega"]["is_avr"] is True
+        assert info["mega"]["is_can_bridge"] is False
+        assert info["spider"]["is_avr"] is False
+        assert info["spider"]["is_can_bridge"] is True
