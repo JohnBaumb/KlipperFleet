@@ -95,7 +95,9 @@ path: ~/KlipperFleet
 origin: https://github.com/JohnBaumb/KlipperFleet.git
 primary_branch: main
 managed_services: klipperfleet
-install_script: install.sh
+virtualenv: ~/KlipperFleet/venv
+requirements: backend/requirements.txt
+system_dependencies: install_scripts/system-dependencies.json
 is_system_service: False
 ```
 

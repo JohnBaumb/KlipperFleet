@@ -93,35 +93,8 @@ sudo udevadm trigger
 
 # Setup passwordless sudo for commands KlipperFleet needs at runtime
 # This is required on Ubuntu and other distros where the user doesn't have NOPASSWD by default.
-echo "KlipperFleet: Configuring sudoers for runtime commands..."
-SUDOERS_FILE="/etc/sudoers.d/klipperfleet"
-cat > "$SUDOERS_FILE" << SUDOERS_EOF
-# KlipperFleet: Allow the service user to manage klipper services and install firmware
-# without a password prompt (required for non-interactive service operation).
-$USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl start klipper*
-$USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop klipper*
-$USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart klipper*
-$USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl start moonraker*
-$USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop moonraker*
-$USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart moonraker*
-$USER ALL=(ALL) NOPASSWD: /bin/systemctl start klipper*
-$USER ALL=(ALL) NOPASSWD: /bin/systemctl stop klipper*
-$USER ALL=(ALL) NOPASSWD: /bin/systemctl restart klipper*
-$USER ALL=(ALL) NOPASSWD: /bin/systemctl start moonraker*
-$USER ALL=(ALL) NOPASSWD: /bin/systemctl stop moonraker*
-$USER ALL=(ALL) NOPASSWD: /bin/systemctl restart moonraker*
-$USER ALL=(ALL) NOPASSWD: /bin/cp * /usr/local/bin/klipper_mcu
-$USER ALL=(ALL) NOPASSWD: /usr/bin/cp * /usr/local/bin/klipper_mcu
-$USER ALL=(ALL) NOPASSWD: /bin/chmod +x /usr/local/bin/klipper_mcu
-$USER ALL=(ALL) NOPASSWD: /usr/bin/chmod +x /usr/local/bin/klipper_mcu
-$USER ALL=(ALL) NOPASSWD: /usr/bin/fuser *
-$USER ALL=(ALL) NOPASSWD: /bin/fuser *
-$USER ALL=(ALL) NOPASSWD: /sbin/ip link set can*
-$USER ALL=(ALL) NOPASSWD: /usr/sbin/ip link set can*
-$USER ALL=(ALL) NOPASSWD: /usr/bin/dfu-util *
-SUDOERS_EOF
-chmod 0440 "$SUDOERS_FILE"
-echo "KlipperFleet: Sudoers configured at $SUDOERS_FILE"
+log_info "Configuring sudoers for runtime commands..."
+python3 "${SRCDIR}/install_scripts/setup_sudoers.py" "$USER"
 
 # 4. Setup Python Virtual Environment
 log_info "Setting up Python virtual environment..."
@@ -155,72 +128,13 @@ fi
 
 # 7. Moonraker Integration (Update Manager)
 log_info "Integrating with Moonraker..."
-MOONRAKER_CONF="${USER_HOME}/printer_data/config/moonraker.conf"
-
-if [ -f "$MOONRAKER_CONF" ]; then
-    if ! grep -q "\[update_manager klipperfleet\]" "$MOONRAKER_CONF"; then
-        log_info "Adding update_manager to moonraker.conf..."
-        cat >> "$MOONRAKER_CONF" << EOF
-
-[update_manager klipperfleet]
-type: git_repo
-path: ${KF_PATH}
-origin: https://github.com/JohnBaumb/KlipperFleet.git
-primary_branch: main
-managed_services: klipperfleet
-install_script: install.sh
-is_system_service: False
-EOF
-    fi
-else
-    log_warn "moonraker.conf not found at ${MOONRAKER_CONF}; skipping update_manager integration."
-fi
+python3 "${SRCDIR}/install_scripts/setup_moonraker.py" "${USER_HOME}/printer_data/config/moonraker.conf" "$KF_PATH"
 
 # 8. Mainsail Navigation Integration
 log_info "Integrating with Mainsail navigation..."
 NAVI_JSON="${MOONRAKER_CONFIG_DIR}/.theme/navi.json"
 mkdir -p "${MOONRAKER_CONFIG_DIR}/.theme"
-
-# Icon: ship (M20,21V19L17,16H13V13H16V11H13V8H16V6H13V3H11V6H8V8H11V11H8V13H11V16H7L4,19V21H20Z)
-KF_HOSTNAME="$(hostname)"
-if [ ! -f "$NAVI_JSON" ]; then
-    log_info "Creating navi.json..."
-fi
-
-python3 - "$NAVI_JSON" "$KF_HOSTNAME" << 'PY'
-import json
-import os
-import sys
-
-path = sys.argv[1]
-hostname = sys.argv[2]
-
-entry = {
-    "title": "KlipperFleet",
-    "href": f"http://{hostname}:8321",
-    "target": "_self",
-    "icon": "M20,21V19L17,16H13V13H16V11H13V8H16V6H13V3H11V6H8V8H11V11H8V13H11V16H7L4,19V21H20Z",
-    "position": 86
-}
-
-data = []
-if os.path.exists(path):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            loaded = json.load(f)
-            if isinstance(loaded, list):
-                data = loaded
-    except Exception:
-        data = []
-
-# Remove stale KlipperFleet entries, then append current one
-data = [item for item in data if not (isinstance(item, dict) and item.get("title") == "KlipperFleet")]
-data.append(entry)
-
-with open(path, "w", encoding="utf-8") as f:
-    json.dump(data, f, indent=2)
-    f.write("\n")
-PY
+python3 "${SRCDIR}/install_scripts/setup_mainsail_navi.py" "$NAVI_JSON" "$(hostname)"
 
 # Ensure mainsail theme paths are writable by the runtime user.
 if ! chown -R "$USER:$USER_GROUP" "${MOONRAKER_CONFIG_DIR}/.theme"; then

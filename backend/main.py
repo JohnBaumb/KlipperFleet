@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -5,6 +6,7 @@ from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, AsyncGenerator
 import os
 import asyncio
+import json
 import logging
 import subprocess
 import sys
@@ -31,7 +33,15 @@ except Exception:
     from flash_manager import FlashManager
     from fleet_manager import FleetManager
 
-app = FastAPI(title="KlipperFleet API", version="1.1.1-alpha")
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    """Startup / shutdown hooks for KlipperFleet."""
+    await _migrate_moonraker_conf()
+    await _ensure_system_deps()
+    yield
+
+
+app = FastAPI(title="KlipperFleet API", version="1.1.1-alpha", lifespan=lifespan)
 
 # Configuration
 KLIPPER_DIR: str = os.path.abspath(os.path.expanduser(os.getenv("KLIPPER_DIR", "~/klipper")))
@@ -84,6 +94,81 @@ kconfig_mgr = KconfigManager(KLIPPER_DIR)
 build_mgr = BuildManager(KLIPPER_DIR, ARTIFACTS_DIR)
 flash_mgr = FlashManager(KLIPPER_DIR, KATAPULT_DIR)
 fleet_mgr = FleetManager(DATA_DIR)
+
+
+async def _migrate_moonraker_conf() -> None:
+    """Self-heal moonraker.conf on every startup.
+
+    When Moonraker updates KlipperFleet via git pull, it restarts this
+    service but never executes install.sh.  This hook ensures that
+    moonraker.conf always has the modern declarative dependency lines
+    (virtualenv, requirements, system_dependencies) so that Moonraker
+    installs deps on *future* updates automatically.
+
+    The migration is idempotent — it checks for missing keys and only
+    writes when something actually changed.
+    """
+    repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    conf_path = os.path.expanduser("~/printer_data/config/moonraker.conf")
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "setup_moonraker",
+            os.path.join(repo_dir, "install_scripts", "setup_moonraker.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        if mod.migrate_moonraker_conf(conf_path, repo_dir):
+            logger.info("Migrated moonraker.conf — added virtualenv/requirements/system_dependencies. "
+                        "Moonraker will pick up the changes on its next restart.")
+    except Exception:
+        logger.debug("moonraker.conf migration check skipped (non-fatal)", exc_info=True)
+
+
+async def _ensure_system_deps() -> None:
+    """Install missing system packages listed in system-dependencies.json.
+
+    Moonraker's declarative system_dependencies only installs *new* entries
+    that appear between git commits.  For users upgrading from a version
+    that lacked system_dependencies entirely (e.g. main → dev), the diff is
+    empty and nothing gets installed.  This hook fills that gap by checking
+    each package and installing any that are missing.
+
+    Runs once at startup, only invokes apt when something is actually absent.
+    """
+    repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    deps_file = os.path.join(repo_dir, "install_scripts", "system-dependencies.json")
+    try:
+        with open(deps_file, "r") as f:
+            data = json.load(f)
+        packages = data.get("debian", [])
+        missing = []
+        for pkg in packages:
+            check = await asyncio.create_subprocess_exec(
+                "dpkg-query", "-W", "-f=${Status}", pkg,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await check.communicate()
+            status = stdout.decode().strip() if stdout else ""
+            if check.returncode != 0 or "install ok installed" not in status:
+                missing.append(pkg)
+        if not missing:
+            return
+        logger.info(f"Missing system packages detected: {missing}. Installing...")
+        proc = await asyncio.create_subprocess_exec(
+            "sudo", "apt-get", "install", "-y", *missing,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode == 0:
+            logger.info(f"Successfully installed system packages: {missing}")
+        else:
+            logger.warning(f"apt-get install failed (rc={proc.returncode}): {stderr.decode().strip()}")
+    except Exception:
+        logger.debug("System dependency check skipped (non-fatal)", exc_info=True)
+
 
 # Profile name validation: only alphanumeric, underscores, hyphens, and dots
 _PROFILE_NAME_RE = re.compile(r'^[a-zA-Z0-9 _.-]+$')
