@@ -557,6 +557,16 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                         flash_results[excl_dev['name']] = "EXCLUDED"
                 
                 task_store.add_log(task_id, ">>> Checking device statuses before stopping services...\n")
+                # Issue #16: Auto-correct method for USB-to-CAN bridges whose device_id
+                # is a /dev/ serial path but method is "can".  These bridges connect via
+                # USB and must flash via serial (Katapult) or DFU, never CAN.
+                for dev in devices:
+                    if dev['method'] == 'can' and dev['id'].startswith('/dev/'):
+                        task_store.add_log(task_id, f">>> Auto-correcting method for {dev['name']}: "
+                                           f"{dev['id']} is a serial path, switching from CAN to serial.\n")
+                        dev['method'] = 'serial'
+                        dev['is_katapult'] = True
+
                 # Pre-discover CAN devices while Moonraker is still running to identify "In Service" nodes
                 can_discovery: List[Dict[str, str]] = await flash_mgr.discover_can_devices()
                 can_status_map: Dict[str, str] = {d['id']: d.get('mode', 'offline') for d in can_discovery}
@@ -1213,7 +1223,13 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             # 3. Resolve ID and Method (in case it changed during reboot or is in a different mode)
             target_id: str = req.device_id
             actual_method: str = req.method
-            
+
+            # Issue #16: USB-to-CAN bridges are configured with method="can" but
+            # their device_id is a /dev/ serial path.  Auto-correct to serial.
+            if actual_method == "can" and target_id.startswith("/dev/"):
+                yield f">>> Auto-correcting: {target_id} is a serial path, switching from CAN to serial flash.\n"
+                actual_method = "serial"
+
             # If the initial check already found it in DFU mode, lock to DFU immediately
             if status == "dfu":
                 resolved_dfu_id: str = await flash_mgr.resolve_dfu_id(req.device_id, known_dfu_id=req.dfu_id)
