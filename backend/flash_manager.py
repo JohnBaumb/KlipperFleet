@@ -900,6 +900,14 @@ print(f"Jump command sent to UUID {device_id}")
         """Sends a reboot command to a device to enter Katapult."""
         yield f">>> Requesting reboot to Katapult for {device_id}...\n"
         method = method.lower()
+
+        # Issue #16: USB-to-CAN bridges are configured as method="can" but
+        # connect via USB serial.  Passing a /dev/ path to flashtool -u crashes
+        # because it expects a hex CAN UUID.  Auto-correct to serial reboot.
+        if method == "can" and device_id.startswith("/dev/"):
+            yield f">>> Auto-correcting: {device_id} is a serial path, using serial reboot instead of CAN.\n"
+            method = "serial"
+
         if method == "can":
             async with self._can_lock:
                 yield f">>> CAN Lock Acquired for rebooting {device_id}\n"
@@ -1042,6 +1050,14 @@ print(f"Jump command sent to UUID {device_id}")
 
     async def flash_can(self, uuid: str, firmware_path: str, interface: str = "can0") -> AsyncGenerator[str, None]:
         """Flashes a device via CAN using Katapult."""
+        # Issue #16: Guard against serial paths being passed as CAN UUIDs.
+        # USB-to-CAN bridges sometimes have method="can" but their device_id is
+        # a /dev/serial/by-id/ path.  flashtool.py -u expects a hex UUID.
+        if uuid.startswith("/dev/"):
+            raise ValueError(
+                f"Cannot flash via CAN: '{uuid}' is a serial device path, not a CAN UUID. "
+                "This is a USB-to-CAN bridge — use serial or DFU flash method instead."
+            )
         async with self._can_lock:
             yield f">>> CAN Lock Acquired for flashing {uuid}\n"
             yield f">>> Flashing {firmware_path} to {uuid} via {interface}...\n"

@@ -684,6 +684,16 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                     if dev.get('profile') and is_avr_profile(dev['profile']):
                         dev['is_katapult'] = False
 
+                # Issue #16: Auto-correct method for USB-to-CAN bridges whose device_id
+                # is a /dev/ serial path but method is "can".  These bridges connect via
+                # USB and must flash via serial (Katapult) or DFU, never CAN.
+                for dev in devices:
+                    if dev['method'] == 'can' and dev['id'].startswith('/dev/'):
+                        task_store.add_log(task_id, f">>> Auto-correcting method for {dev['name']}: "
+                                           f"{dev['id']} is a serial path, switching from CAN to serial.\n")
+                        dev['method'] = 'serial'
+                        dev['is_katapult'] = True
+
                 # Pre-discover CAN devices while Moonraker is still running to identify "In Service" nodes
                 can_discovery: List[Dict[str, str]] = await flash_mgr.discover_can_devices()
                 can_status_map: Dict[str, str] = {d['id']: d.get('mode', 'offline') for d in can_discovery}
@@ -1251,10 +1261,11 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             yield await manage_klipper_services("stop")
             services_stopped = True
 
-            # Query the fleet to determine the interface, baudrate, and katapult setting for this device
+            # Query the fleet to determine the interface, baudrate, bridge and katapult settings for this device
             interface = "can0"
             baudrate = req.baudrate if req.baudrate else 250000
             is_katapult = True  # Default to True for backward compatibility
+            is_bridge = False
             try:
                 fleet = fleet_mgr.get_fleet()
                 for d in fleet:
@@ -1262,6 +1273,7 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                         interface = d.get("interface", interface)
                         baudrate = d.get("baudrate", baudrate)
                         is_katapult = d.get("is_katapult", True)
+                        is_bridge = d.get("is_bridge", False)
                         break
             except Exception:
                 logger.warning("Failed to read fleet for device %s, using defaults (interface=%s, baudrate=%s)",
@@ -1336,8 +1348,10 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                         await asyncio.sleep(1)
                         break
                     
-                    # Check for NEW serial device (Katapult mode) using snapshot diff
-                    if req.method == "serial":
+                    # Check for NEW serial device (Katapult mode) using snapshot diff.
+                    # Issue #16: CAN bridges drop the can0 interface when rebooted to
+                    # Katapult and reappear as USB serial devices.  Detect them here.
+                    if req.method == "serial" or (req.method == "can" and is_bridge):
                         current_serials: List[Dict[str, str]] = await flash_mgr.discover_serial_devices(skip_moonraker=True)
                         current_ids: List[str] = [d['id'] for d in current_serials]
                         
@@ -1364,7 +1378,20 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             # 3. Resolve ID and Method (in case it changed during reboot or is in a different mode)
             target_id: str = req.device_id
             actual_method: str = req.method
-            
+
+            # Issue #16: USB-to-CAN bridges drop the CAN bus when rebooted to
+            # Katapult and reappear as USB serial devices.  If we detected a new
+            # serial device during the wait loop, switch to serial flash.
+            if actual_method == "can" and is_bridge and new_serial_device:
+                target_id = new_serial_device
+                actual_method = "serial"
+                yield f">>> Bridge is now in Katapult mode (serial): {target_id}\n"
+
+            # Fallback: if device_id is a /dev/ path but method is still CAN, auto-correct.
+            if actual_method == "can" and target_id.startswith("/dev/"):
+                yield f">>> Auto-correcting: {target_id} is a serial path, switching from CAN to serial flash.\n"
+                actual_method = "serial"
+
             # If the initial check already found it in DFU mode, lock to DFU immediately
             if status == "dfu":
                 resolved_dfu_id: str = await flash_mgr.resolve_dfu_id(req.device_id, known_dfu_id=req.dfu_id)
