@@ -1127,15 +1127,17 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             yield await manage_klipper_services("stop")
             services_stopped = True
 
-            # Query the fleet to determine the interface and baudrate for this device
+            # Query the fleet to determine the interface, baudrate, and bridge status for this device
             interface = "can0"
             baudrate = req.baudrate if req.baudrate else 250000
+            is_bridge = False
             try:
                 fleet = fleet_mgr.get_fleet()
                 for d in fleet:
                     if d.get("id") == req.device_id:
                         interface = d.get("interface", interface)
                         baudrate = d.get("baudrate", baudrate)
+                        is_bridge = d.get("is_bridge", False)
                         break
             except Exception:
                 logger.warning("Failed to read fleet for device %s, using defaults (interface=%s, baudrate=%s)",
@@ -1195,8 +1197,10 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                         await asyncio.sleep(1)
                         break
                     
-                    # Check for NEW serial device (Katapult mode) using snapshot diff
-                    if req.method == "serial":
+                    # Check for NEW serial device (Katapult mode) using snapshot diff.
+                    # Issue #16: CAN bridges drop the can0 interface when rebooted to
+                    # Katapult and reappear as USB serial devices.  Detect them here.
+                    if req.method == "serial" or (req.method == "can" and is_bridge):
                         current_serials: List[Dict[str, str]] = await flash_mgr.discover_serial_devices(skip_moonraker=True)
                         current_ids: List[str] = [d['id'] for d in current_serials]
                         
@@ -1224,8 +1228,15 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             target_id: str = req.device_id
             actual_method: str = req.method
 
-            # Issue #16: USB-to-CAN bridges are configured with method="can" but
-            # their device_id is a /dev/ serial path.  Auto-correct to serial.
+            # Issue #16: USB-to-CAN bridges drop the CAN bus when rebooted to
+            # Katapult and reappear as USB serial devices.  If we detected a new
+            # serial device during the wait loop, switch to serial flash.
+            if actual_method == "can" and is_bridge and new_serial_device:
+                target_id = new_serial_device
+                actual_method = "serial"
+                yield f">>> Bridge is now in Katapult mode (serial): {target_id}\n"
+
+            # Fallback: if device_id is a /dev/ path but method is still CAN, auto-correct.
             if actual_method == "can" and target_id.startswith("/dev/"):
                 yield f">>> Auto-correcting: {target_id} is a serial path, switching from CAN to serial flash.\n"
                 actual_method = "serial"

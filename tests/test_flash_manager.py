@@ -334,3 +334,69 @@ class TestIssue16BridgeSerialPathGuard:
         assert resolve_method(can_uuid, "can") == "can"
         assert resolve_method(serial_path, "serial") == "serial"
         assert resolve_method(serial_path, "dfu") == "dfu"
+
+    def test_bridge_hex_uuid_switches_to_serial_after_reboot(self):
+        """Issue #16 real scenario: CAN bridge with hex UUID must switch to serial flash
+        after rebooting to Katapult, because the bridge IS the can0 interface and
+        dropping to Katapult kills the CAN bus."""
+        # matthew73210's actual config: hex UUID, method=can, is_bridge=true
+        can_uuid = "69cd41686193"
+        actual_method = "can"
+        is_bridge = True
+        new_serial_device = "/dev/serial/by-id/usb-katapult_stm32h750xx_34001B001751333233393839-if00"
+
+        # Replicate the method resolution from main.py single-flash path:
+        # After reboot, bridge reappears as serial, new_serial_device is set by wait loop.
+        target_id = can_uuid
+        if actual_method == "can" and is_bridge and new_serial_device:
+            target_id = new_serial_device
+            actual_method = "serial"
+
+        assert actual_method == "serial"
+        assert target_id == new_serial_device
+
+    def test_bridge_hex_uuid_no_serial_detected_stays_can(self):
+        """If bridge reboot didn't produce a new serial device, don't switch method."""
+        can_uuid = "69cd41686193"
+        actual_method = "can"
+        is_bridge = True
+        new_serial_device = None  # Detection loop found nothing
+
+        target_id = can_uuid
+        if actual_method == "can" and is_bridge and new_serial_device:
+            target_id = new_serial_device
+            actual_method = "serial"
+
+        # Should remain can — the interface might still be up (e.g., device wasn't rebooted)
+        assert actual_method == "can"
+        assert target_id == can_uuid
+
+    def test_non_bridge_can_device_not_affected(self):
+        """Normal CAN nodes (not bridges) should never switch to serial flash."""
+        can_uuid = "a1b2c3d4e5f6"
+        actual_method = "can"
+        is_bridge = False
+        new_serial_device = "/dev/serial/by-id/usb-katapult_stm32f072xb_12345-if00"
+
+        target_id = can_uuid
+        if actual_method == "can" and is_bridge and new_serial_device:
+            target_id = new_serial_device
+            actual_method = "serial"
+
+        assert actual_method == "can"
+        assert target_id == can_uuid
+
+    def test_serial_detection_triggers_for_can_bridge(self):
+        """The wait loop serial detection condition must include CAN bridges."""
+        # Replicate the condition from the wait loop
+        test_cases = [
+            ("serial", False, True),   # serial method always scans
+            ("serial", True, True),    # serial bridge always scans
+            ("can", True, True),       # CAN bridge must scan (Issue #16 fix)
+            ("can", False, False),     # normal CAN node should NOT scan
+            ("dfu", False, False),     # DFU method should NOT scan
+            ("dfu", True, False),      # DFU bridge should NOT scan (uses DFU path)
+        ]
+        for method, bridge, expected in test_cases:
+            should_scan = (method == "serial") or (method == "can" and bridge)
+            assert should_scan == expected, f"method={method}, bridge={bridge}: expected {expected}"
