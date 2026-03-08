@@ -38,8 +38,10 @@ def main():
         except Exception:
             data = []
 
-    # Remove stale KlipperFleet entries, then append current one
-    data = [item for item in data if not (isinstance(item, dict) and item.get("title") == "KlipperFleet")]
+    # Remove stale KlipperFleet entries (by title or href), then append current one
+    data = [item for item in data if not (isinstance(item, dict) and (
+        item.get("title") == "KlipperFleet" or item.get("href") in ("/klipperfleet.html", entry["href"])
+    ))]
     data.append(entry)
 
     with open(path, "w", encoding="utf-8") as f:
