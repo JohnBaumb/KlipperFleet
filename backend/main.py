@@ -352,6 +352,92 @@ async def get_status() -> Dict[str, Any]:
         "is_klipper_kconfiglib": kconfig_mgr.is_klipper_kconfiglib
     }
 
+@app.get("/api/health")
+async def get_health() -> Dict[str, Any]:
+    """Checks install health: system packages, venv, sudoers, udev, moonraker config."""
+    repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    issues: List[str] = []
+
+    # 1. System packages
+    deps_file = os.path.join(repo_dir, "install_scripts", "system-dependencies.json")
+    try:
+        with open(deps_file, "r") as f:
+            packages = json.load(f).get("debian", [])
+        for pkg in packages:
+            proc = await asyncio.create_subprocess_exec(
+                "dpkg-query", "-W", "-f=${Status}", pkg,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await proc.communicate()
+            status = stdout.decode().strip() if stdout else ""
+            if proc.returncode != 0 or "install ok installed" not in status:
+                issues.append(f"Missing system package: {pkg}")
+    except Exception:
+        issues.append("Cannot read system-dependencies.json")
+
+    # 2. Python venv
+    venv_dir = os.path.join(repo_dir, "venv")
+    if not os.path.isdir(venv_dir):
+        issues.append("Python virtual environment missing")
+    else:
+        # Check pip deps
+        pip_bin = os.path.join(venv_dir, "bin", "pip")
+        if os.path.isfile(pip_bin):
+            req_file = os.path.join(repo_dir, "backend", "requirements.txt")
+            try:
+                with open(req_file, "r") as f:
+                    required = {line.strip().lower() for line in f
+                                if line.strip() and not line.startswith("#")}
+                proc = await asyncio.create_subprocess_exec(
+                    pip_bin, "list", "--format=columns",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                stdout, _ = await proc.communicate()
+                installed = set()
+                for line in stdout.decode().splitlines()[2:]:
+                    parts = line.split()
+                    if parts:
+                        installed.add(parts[0].lower())
+                for pkg in required:
+                    if pkg not in installed:
+                        issues.append(f"Missing pip package: {pkg}")
+            except Exception:
+                pass
+
+    # 3. Sudoers file
+    if not os.path.isfile("/etc/sudoers.d/klipperfleet"):
+        issues.append("Sudoers file missing (/etc/sudoers.d/klipperfleet)")
+
+    # 4. Udev rules
+    if not os.path.isfile("/etc/udev/rules.d/99-stm32-dfu.rules"):
+        issues.append("DFU udev rules missing")
+
+    # 5. Moonraker config
+    conf_path = os.path.expanduser("~/printer_data/config/moonraker.conf")
+    try:
+        with open(conf_path, "r") as f:
+            conf = f.read()
+        if "[update_manager klipperfleet]" in conf:
+            section_start = conf.index("[update_manager klipperfleet]")
+            next_section = conf.find("\n[", section_start + 1)
+            section = conf[section_start:next_section] if next_section != -1 else conf[section_start:]
+            if "install_script:" in section:
+                issues.append("moonraker.conf uses deprecated install_script")
+            for key in ("virtualenv:", "requirements:", "system_dependencies:"):
+                if key not in section:
+                    issues.append(f"moonraker.conf missing {key.rstrip(':')}")
+        else:
+            issues.append("moonraker.conf missing [update_manager klipperfleet] section")
+    except FileNotFoundError:
+        issues.append("moonraker.conf not found")
+    except Exception:
+        pass
+
+    return {"healthy": len(issues) == 0, "issues": issues}
+
+
 @app.get("/api/print_status")
 async def get_print_status() -> Dict[str, Any]:
     """Returns whether any printer is currently printing (via Moonraker)."""

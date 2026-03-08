@@ -55,6 +55,12 @@
                 <button @click="selfUpdate" :disabled="updating" class="w-full text-left p-2 rounded flex items-center text-xs text-gray-300 hover:bg-gray-800 hover:text-white transition-colors">
                     <i class="fas fa-sync-alt mr-2" :class="updating ? 'fa-spin' : ''"></i> 
                     {{ updating ? 'Updating...' : 'Update KlipperFleet' }}
+                    <i v-if="healthChecked && healthIssues.length > 0" 
+                       class="fas fa-exclamation-circle ml-auto text-orange-400 cursor-help"
+                       :title="healthIssues.join('\n')"></i>
+                    <i v-else-if="healthChecked" 
+                       class="fas fa-check-circle ml-auto text-green-500"
+                       title="All checks passed"></i>
                 </button>
                 <div v-if="!isKlipperKconfiglib" class="p-2 bg-red-900/30 border border-red-800/50 rounded text-[9px] text-red-400 leading-tight">
                     <i class="fas fa-exclamation-triangle mr-1"></i>
@@ -687,6 +693,8 @@
                 const building = ref(false);
                 const flashing = ref(false);
                 const updating = ref(false);
+                const healthIssues = ref([]);
+                const healthChecked = ref(false);
                 const querying = ref(false);
                 const printing = ref(false);
                 const printState = ref('');
@@ -1575,6 +1583,17 @@
                     }
                 };
 
+                const fetchHealth = async () => {
+                    try {
+                        const res = await fetch('/api/health');
+                        const data = await res.json();
+                        healthIssues.value = data.issues || [];
+                        healthChecked.value = true;
+                    } catch (e) {
+                        console.error('Health check failed', e);
+                    }
+                };
+
                 const selfUpdate = async () => {
                     if (!await showConfirm("Self Update", "This will pull the latest changes and restart the service. Continue?")) return;
                     updating.value = true;
@@ -1632,6 +1651,7 @@
                     fetchPrintStatus();
                     discoverDevices();
                     fetchSystemStatus();
+                    fetchHealth();
                     
                     // Refresh fleet status every 30 seconds (with error backoff)
                     let fleetErrors = 0;
@@ -1702,7 +1722,8 @@
                     modal, showAlert, showConfirm, showPrompt, closeModal, testMagicBaud,
                     services, manageServices, cancelTask, currentTaskId,
                     showRawSymbolNames, showOptionalFeatures, isKlipperKconfiglib, firmwareName,
-                    deviceVersions, systemKlipperVersion, versionMatch, versionColor, versionTitle
+                    deviceVersions, systemKlipperVersion, versionMatch, versionColor, versionTitle,
+                    healthIssues, healthChecked
                 };
             }
         }).mount('#app');
