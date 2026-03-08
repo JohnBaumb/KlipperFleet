@@ -1,5 +1,4 @@
 import pytest
-import os
 from backend.kconfig_manager import KconfigManager
 
 @pytest.fixture

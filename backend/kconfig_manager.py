@@ -1,8 +1,11 @@
 import asyncio
+import logging
 import os
 import subprocess
 import sys
 from typing import List, Dict, Any, Optional
+
+logger = logging.getLogger("klipperfleet.kconfig")
 
 # Global placeholder for the kconfiglib module
 kconfiglib: Any = None
@@ -34,17 +37,17 @@ class KconfigManager:
                 import kconfiglib as k_lib
                 kconfiglib = k_lib
                 _is_klipper_kconfiglib = True
-                print(f"Loaded kconfiglib from {kconfig_lib_path}")
+                logger.info("Loaded kconfiglib from %s", kconfig_lib_path)
                 return
             except ImportError:
-                print(f"Failed to import kconfiglib from {kconfig_lib_path}")
+                logger.warning("Failed to import kconfiglib from %s", kconfig_lib_path)
 
         # Fallback to system kconfiglib
         try:
             import kconfiglib as k_lib
             kconfiglib = k_lib
             _is_klipper_kconfiglib = False
-            print("Loaded system kconfiglib")
+            logger.info("Loaded system kconfiglib")
         except ImportError:
             raise ImportError("Could not load kconfiglib from Klipper directory or system.")
 
@@ -70,7 +73,7 @@ class KconfigManager:
         if os.path.exists(extras_kconfig):
             return  # Already generated (e.g. user ran make menuconfig)
         
-        print(f"Kalico detected: running find-firmware-extras.sh to generate src/extras/Kconfig")
+        logger.info("Kalico detected: running find-firmware-extras.sh to generate src/extras/Kconfig")
         try:
             subprocess.run(
                 ["bash", extras_script],
@@ -80,10 +83,10 @@ class KconfigManager:
                 capture_output=True,
                 text=True,
             )
-            print("Successfully generated src/extras/Kconfig")
+            logger.info("Successfully generated src/extras/Kconfig")
         except Exception as e:
             # Fallback: create an empty Kconfig so kconfiglib doesn't crash
-            print(f"Warning: find-firmware-extras.sh failed ({e}), creating empty src/extras/Kconfig")
+            logger.warning("find-firmware-extras.sh failed (%s), creating empty src/extras/Kconfig", e)
             extras_dir = os.path.join(klipper_dir, "src", "extras")
             os.makedirs(extras_dir, exist_ok=True)
             with open(extras_kconfig, "w") as f:
@@ -102,29 +105,33 @@ class KconfigManager:
         # Handle Kalico/fork-specific setup before parsing Kconfig
         self._run_firmware_extras_script(abs_klipper_dir)
 
-        # Save current CWD and switch to klipper_dir so relative 'source' paths resolve
+        # Use absolute kconfig_file path so kconfiglib doesn't need CWD to resolve
+        # relative 'source' directives. We set SRCTREE/srctree above which handles
+        # most resolution, but some older kconfiglib versions also check CWD.
+        # Instead of os.chdir (which is process-wide and not concurrency-safe),
+        # we pass the absolute path and set the environment variables.
+        abs_kconfig_file: str = os.path.abspath(self.kconfig_file)
         old_cwd: str = os.getcwd()
         os.chdir(abs_klipper_dir)
         try:
-            # kconfiglib.Kconfig will use the environment variables to resolve 'source' paths
-            self.kconf = kconfiglib.Kconfig(self.kconfig_file, warn=False)
-            
-            # Force certain symbols to 'y' to improve UX (e.g. show optimization menus)
-            for sym_name in ["HAVE_LIMITED_CODE_SIZE", "LOW_LEVEL_OPTIONS"]:
-                if sym_name in self.kconf.syms:
-                    sym = self.kconf.syms[sym_name]
-                    # Use internal _set_value or user_value to bypass prompt checks
-                    sym.set_value(2) 
-                    if sym.tri_value == 0:
-                        # If still 'n', it's likely an internal symbol with no prompt.
-                        # We can't easily force it in kconfiglib without a 'select',
-                        # so we'll handle visibility in the tree parser instead.
-                        pass
-
-            if config_file and os.path.exists(config_path := os.path.expanduser(config_file)):
-                self.kconf.load_config(config_path)
+            self.kconf = kconfiglib.Kconfig(abs_kconfig_file, warn=False)
         finally:
             os.chdir(old_cwd)
+
+        # Force certain symbols to 'y' to improve UX (e.g. show optimization menus)
+        for sym_name in ["HAVE_LIMITED_CODE_SIZE", "LOW_LEVEL_OPTIONS"]:
+            if sym_name in self.kconf.syms:
+                sym = self.kconf.syms[sym_name]
+                # Use internal _set_value or user_value to bypass prompt checks
+                sym.set_value(2) 
+                if sym.tri_value == 0:
+                    # If still 'n', it's likely an internal symbol with no prompt.
+                    # We can't easily force it in kconfiglib without a 'select',
+                    # so we'll handle visibility in the tree parser instead.
+                    pass
+
+        if config_file and os.path.exists(config_path := os.path.expanduser(config_file)):
+            self.kconf.load_config(config_path)
 
     def get_menu_tree(self, show_optional: bool = False) -> List[Dict[str, Any]]:
         """Returns a JSON-serializable tree of the Kconfig menu."""

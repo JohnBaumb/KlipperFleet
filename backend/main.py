@@ -320,7 +320,7 @@ class Device(BaseModel):
     interface: Optional[str] = "can0"
     baudrate: Optional[int] = 250000  # Serial baudrate for Katapult flashtool.py (common: 115200, 250000, 500000)
     notes: Optional[str] = ""
-    is_katapult: bool = False
+    is_katapult: bool = True
     is_bridge: bool = False
     dfu_id: Optional[str] = None
     magic_baud_tested: bool = False
@@ -607,15 +607,15 @@ async def rename_profile(name: str, body: ProfileRename) -> Dict[str, str]:
     # Rename the config file
     os.rename(old_path, new_path)
     
-    # Rename any matching artifacts (.bin, .elf)
-    for ext in [".bin", ".elf"]:
+    # Rename any matching artifacts (.bin, .elf, .elf.hex, .build_info.json)
+    for ext in [".bin", ".elf", ".elf.hex", ".build_info.json"]:
         old_artifact = os.path.join(ARTIFACTS_DIR, f"{name}{ext}")
         new_artifact = os.path.join(ARTIFACTS_DIR, f"{body.new_name}{ext}")
         if os.path.exists(old_artifact):
             os.rename(old_artifact, new_artifact)
     
     # Update fleet references
-    fleet_mgr.rename_profile(name, body.new_name)
+    await fleet_mgr.rename_profile(name, body.new_name)
     
     return {"message": f"Profile renamed from '{name}' to '{body.new_name}'"}
 
@@ -731,7 +731,7 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
         flash_results: Dict[str, str] = {}  # device_name -> "SUCCESS"/"SKIPPED"/"FAILED"
         
         try:
-            devices: List[Dict[str, Any]] = fleet_mgr.get_fleet()
+            devices: List[Dict[str, Any]] = await fleet_mgr.get_fleet()
             
             # 1. Build phase
             if "build" in action:
@@ -1163,6 +1163,7 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
 @app.get("/download/{profile}")
 async def download_firmware(profile: str) -> FileResponse:
     """Downloads the firmware binary for the specified profile."""
+    validate_profile_name(profile)
     fw_path: Optional[str] = resolve_firmware_path(profile, "serial")  # serial triggers .bin->.elf fallback
         
     if fw_path is None:
@@ -1178,7 +1179,7 @@ async def download_firmware(profile: str) -> FileResponse:
 @app.get("/fleet")
 async def get_fleet(fast: bool = False) -> List[Dict[str, Any]]:
     """Returns the registered fleet of devices with status."""
-    fleet: List[Dict[str, Any]] = fleet_mgr.get_fleet()
+    fleet: List[Dict[str, Any]] = await fleet_mgr.get_fleet()
     
     # Check for active tasks to get real-time status overrides
     status_overrides = {}
@@ -1253,13 +1254,13 @@ async def get_fleet(fast: bool = False) -> List[Dict[str, Any]]:
 @app.post("/fleet/device")
 async def save_device(device: Device) -> Dict[str, str]:
     """Registers or updates a device in the fleet."""
-    fleet_mgr.save_device(device.dict())
+    await fleet_mgr.save_device(device.dict())
     return {"message": "Device saved to fleet"}
 
 @app.post("/fleet/attach")
 async def post_fleet_attach(req: AttachRequest) -> Dict[str, str]:
     """Attaches a discovered hardware ID to an existing fleet entry."""
-    fleet: List[Dict[str, Any]] = fleet_mgr.get_fleet()
+    fleet: List[Dict[str, Any]] = await fleet_mgr.get_fleet()
     for dev in fleet:
         if dev['id'] == req.fleet_id:
             if req.method == 'dfu':
@@ -1268,20 +1269,20 @@ async def post_fleet_attach(req: AttachRequest) -> Dict[str, str]:
                 # If we are attaching a serial device to a fleet entry, 
                 # we update the primary ID to the serial path.
                 dev['id'] = req.hardware_id
-            fleet_mgr.save_device(dev)
+            await fleet_mgr.save_device(dev)
             return {"message": "Device attached"}
     raise HTTPException(status_code=404, detail="Fleet device not found")
 
 @app.delete("/fleet/device")
 async def remove_device(device_id: str) -> Dict[str, str]:
     """Removes a device from the fleet."""
-    fleet_mgr.remove_device(device_id)
+    await fleet_mgr.remove_device(device_id)
     return {"message": "Device removed from fleet"}
 
 @app.get("/fleet/versions")
 async def get_fleet_versions() -> Dict[str, Any]:
     """Gets live version information for all fleet devices that are in service."""
-    fleet = fleet_mgr.get_fleet()
+    fleet = await fleet_mgr.get_fleet()
     mcu_versions = await flash_mgr.get_mcu_versions()
     
     version_info: Dict[str, Any] = {}
@@ -1325,7 +1326,7 @@ async def discover_devices() -> Dict[str, List[Dict[str, Any]]]:
     linux_devs: List[Dict[str, Any]] = flash_mgr.discover_linux_process()
     
     # Mark managed devices
-    fleet = fleet_mgr.get_fleet()
+    fleet = await fleet_mgr.get_fleet()
     managed_ids = set()
     for d in fleet:
         managed_ids.add(d['id'])
@@ -1373,7 +1374,7 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             is_katapult = True  # Default to True for backward compatibility
             is_bridge = False
             try:
-                fleet = fleet_mgr.get_fleet()
+                fleet = await fleet_mgr.get_fleet()
                 for d in fleet:
                     if d.get("id") == req.device_id:
                         interface = d.get("interface", interface)
@@ -1563,7 +1564,7 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                 # Update version info in fleet after successful flash
                 build_info = build_mgr.get_last_build_info(req.profile)
                 if build_info:
-                    fleet_mgr.update_device_version(req.device_id, build_info)
+                    await fleet_mgr.update_device_version(req.device_id, build_info)
                     yield f">>> Version recorded: {build_info.get('version', 'unknown')} ({build_info.get('commit', 'unknown')})\n"
             except Exception as e:
                 yield f"!!! Error during flash: {str(e)}\n"
@@ -1594,7 +1595,7 @@ async def reboot_device(device_id: str, mode: str = "katapult", method: Optional
     task_store.tasks[task_id]["is_bus_task"] = True
 
     # Find device in fleet to check if it's a bridge
-    fleet: List[Dict[str, Any]] = fleet_mgr.get_fleet()
+    fleet: List[Dict[str, Any]] = await fleet_mgr.get_fleet()
     dev: Dict[str, Any] = next((d for d in fleet if d['id'] == device_id), {})
     is_bridge = dev.get('is_bridge', False)
     

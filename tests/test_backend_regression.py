@@ -2,9 +2,7 @@
 import pytest
 import re
 import os
-import sys
 import json
-import threading
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 from backend.flash_manager import FlashManager
@@ -121,7 +119,7 @@ class TestBuildFailureDetection:
 # ---------------------------------------------------------------------------
 
 
-class TestFleetManagerThreadSafety:
+class TestFleetManagerConcurrency:
     """Bug #4: FleetManager must not lose writes under concurrent access."""
 
     @pytest.fixture
@@ -129,30 +127,21 @@ class TestFleetManagerThreadSafety:
         from backend.fleet_manager import FleetManager
         return FleetManager(str(tmp_path))
 
-    def test_concurrent_saves_no_data_loss(self, fleet_mgr):
+    @pytest.mark.asyncio
+    async def test_concurrent_saves_no_data_loss(self, fleet_mgr):
         """Concurrent save_device calls should not lose any devices."""
-        errors = []
+        async def save_device(i):
+            await fleet_mgr.save_device({"id": f"dev_{i}", "name": f"Device {i}"})
 
-        def save_device(i):
-            try:
-                fleet_mgr.save_device({"id": f"dev_{i}", "name": f"Device {i}"})
-            except Exception as e:
-                errors.append(e)
+        await asyncio.gather(*(save_device(i) for i in range(20)))
 
-        threads = [threading.Thread(target=save_device, args=(i,)) for i in range(20)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        assert not errors, f"Errors during concurrent saves: {errors}"
-        fleet = fleet_mgr.get_fleet()
+        fleet = await fleet_mgr.get_fleet()
         assert len(fleet) == 20, f"Expected 20 devices, got {len(fleet)}"
 
-    def test_atomic_write_no_partial_json(self, fleet_mgr, tmp_path):
+    @pytest.mark.asyncio
+    async def test_atomic_write_no_partial_json(self, fleet_mgr, tmp_path):
         """Fleet file should never contain partial/corrupt JSON."""
-        # Save a device
-        fleet_mgr.save_device({"id": "test", "name": "Test"})
+        await fleet_mgr.save_device({"id": "test", "name": "Test"})
 
         # Read the raw file and verify it's valid JSON
         fleet_file = tmp_path / "fleet.json"
@@ -161,38 +150,25 @@ class TestFleetManagerThreadSafety:
         assert len(data) == 1
         assert data[0]["id"] == "test"
 
-    def test_concurrent_read_write(self, fleet_mgr):
+    @pytest.mark.asyncio
+    async def test_concurrent_read_write(self, fleet_mgr):
         """Reading fleet while writing should not raise."""
-        errors = []
-
-        def writer():
+        async def writer():
             for i in range(10):
-                try:
-                    fleet_mgr.save_device({"id": f"w_{i}", "name": f"Writer {i}"})
-                except Exception as e:
-                    errors.append(e)
+                await fleet_mgr.save_device({"id": f"w_{i}", "name": f"Writer {i}"})
 
-        def reader():
+        async def reader():
             for _ in range(10):
-                try:
-                    fleet_mgr.get_fleet()
-                except Exception as e:
-                    errors.append(e)
+                await fleet_mgr.get_fleet()
 
-        t1 = threading.Thread(target=writer)
-        t2 = threading.Thread(target=reader)
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
+        await asyncio.gather(writer(), reader())
 
-        assert not errors, f"Errors during concurrent read/write: {errors}"
-
-    def test_update_version_under_lock(self, fleet_mgr):
+    @pytest.mark.asyncio
+    async def test_update_version_under_lock(self, fleet_mgr):
         """update_device_version should work safely with the lock."""
-        fleet_mgr.save_device({"id": "dev1", "name": "Device 1"})
-        fleet_mgr.update_device_version("dev1", {"version": "v1.0", "commit": "abc123"})
-        fleet = fleet_mgr.get_fleet()
+        await fleet_mgr.save_device({"id": "dev1", "name": "Device 1"})
+        await fleet_mgr.update_device_version("dev1", {"version": "v1.0", "commit": "abc123"})
+        fleet = await fleet_mgr.get_fleet()
         assert fleet[0]["flashed_version"] == "v1.0"
         assert fleet[0]["flashed_commit"] == "abc123"
         assert "last_flashed" in fleet[0]

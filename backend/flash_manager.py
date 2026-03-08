@@ -2,8 +2,11 @@ import os
 import asyncio
 import glob
 import httpx
+import logging
 from typing import List, Dict, AsyncGenerator, Optional, Any, Set
 from asyncio.subprocess import Process
+
+logger = logging.getLogger("klipperfleet.flash")
 
 class FlashManager:
     def __init__(self, klipper_dir: str, katapult_dir: str) -> None:
@@ -216,7 +219,7 @@ class FlashManager:
                             "mode": "ready"
                         })
             except Exception as e:
-                print(f"Error discovering DFU devices: {e}")
+                logger.error("Error discovering DFU devices: %s", e)
 
             self._dfu_cache = list(devices)
             self._dfu_cache_time = now
@@ -301,7 +304,7 @@ class FlashManager:
                             "stats": stats
                         }
         except Exception as e:
-            print(f"Error querying Moonraker: {e}")
+            logger.error("Error querying Moonraker: %s", e)
         return mcus
 
     async def get_mcu_versions(self) -> Dict[str, Dict[str, Any]]:
@@ -361,7 +364,7 @@ class FlashManager:
                     }
                     
         except Exception as e:
-            print(f"Error querying MCU versions: {e}")
+            logger.error("Error querying MCU versions: %s", e)
         return versions
 
     async def check_printer_printing(self) -> Dict[str, Any]:
@@ -397,7 +400,7 @@ class FlashManager:
             async with httpx.AsyncClient() as client:
                 await client.post("http://localhost:7125/printer/gcode/script?script=FIRMWARE_RESTART", timeout=2.0)
         except Exception as e:
-            print(f"Error sending FIRMWARE_RESTART: {e}")
+            logger.error("Error sending FIRMWARE_RESTART: %s", e)
 
     async def ensure_canbus_up(self, interface: str = "can0", bitrate: int = 1000000) -> None:
         """Ensures the CAN interface is up."""
@@ -410,14 +413,14 @@ class FlashManager:
             )
             stdout, _ = await process.communicate()
             if b"state UP" not in stdout:
-                print(f"Bringing up {interface}...")
+                logger.info("Bringing up %s...", interface)
                 process = await asyncio.create_subprocess_exec(
                     "sudo", "ip", "link", "set", interface, "up", "type", "can", "bitrate", str(bitrate)
                 )
                 await process.wait()
                 await asyncio.sleep(1)
         except Exception as e:
-            print(f"Error ensuring CAN up: {e}")
+            logger.error("Error ensuring CAN up: %s", e)
 
     async def list_can_interfaces(self) -> List[str]:
         """Lists all CAN interfaces present in the system."""
@@ -435,7 +438,7 @@ class FlashManager:
                     can_interfaces.append(iface)
             return can_interfaces
         except Exception as e:
-            print(f"Error listing CAN interfaces: {e}")
+            logger.error("Error listing CAN interfaces: %s", e)
             return []
 
     async def discover_can_devices(self, skip_moonraker: bool = False, force: bool = False) -> List[Dict[str, str]]:
@@ -451,7 +454,7 @@ class FlashManager:
                 skip_moonraker = True # Only query Moonraker once for the first interface if at all
             return devices
         except Exception as e:
-            print(f"Error discovering CAN devices: {e}")
+            logger.error("Error discovering CAN devices: %s", e)
             return []
 
     async def discover_can_devices_with_interface(self, skip_moonraker: bool = False, force: bool = False, interface: str = "can0") -> List[Dict[str, str]]:
@@ -463,7 +466,7 @@ class FlashManager:
             return list(self._can_cache.get(interface, []))
 
         async with self._can_lock:
-            print(">>> CAN Lock Acquired for discovery")
+            logger.debug("CAN Lock Acquired for discovery")
             seen_uuids = {} # uuid -> device_dict
 
             async def run_klipper_query():
@@ -510,7 +513,7 @@ class FlashManager:
                             results.append((uuid, app))
                     return results
                 except Exception as e:
-                    print(f"Katapult query error: {e}")
+                    logger.error("Katapult query error: %s", e)
                     return []
 
             # Run discovery methods sequentially to avoid CAN bus contention
@@ -574,7 +577,7 @@ class FlashManager:
             self._can_cache[interface] = results
             self._can_cache_time[interface] = asyncio.get_event_loop().time()
             
-            print(">>> CAN Lock Released")
+            logger.debug("CAN Lock Released")
             return results
 
     def discover_linux_process(self) -> List[Dict[str, str]]:

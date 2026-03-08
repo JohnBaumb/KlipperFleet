@@ -27,7 +27,7 @@ class BuildManager:
                     with open(filepath, "r") as f:
                         self._last_build_info[profile_name] = json.load(f)
         except Exception as e:
-            print(f"Warning: Could not load build info from disk: {e}")
+            logger.warning("Could not load build info from disk: %s", e)
 
     async def get_klipper_version(self) -> Dict[str, str]:
         """Gets the current Klipper git version info."""
@@ -67,7 +67,7 @@ class BuildManager:
                 version_info["date"] = stdout.decode().strip()
                 
         except Exception as e:
-            print(f"Error getting Klipper version: {e}")
+            logger.error("Error getting Klipper version: %s", e)
         return version_info
 
     def get_last_build_info(self, profile: str) -> Optional[Dict[str, Any]]:
@@ -114,11 +114,35 @@ class BuildManager:
         )
 
         assert process.stdout is not None
+        build_timeout_s = 600  # 10 minutes total
+        stall_timeout_s = 120  # 2 minutes without output
+        start_time = time.monotonic()
+        timed_out = False
         while True:
-            line: bytes = await process.stdout.readline()
+            elapsed = time.monotonic() - start_time
+            if elapsed > build_timeout_s:
+                timed_out = True
+                yield f"!!! Build timed out after {build_timeout_s}s\n"
+                break
+            try:
+                line: bytes = await asyncio.wait_for(
+                    process.stdout.readline(), timeout=stall_timeout_s
+                )
+            except asyncio.TimeoutError:
+                timed_out = True
+                yield f"!!! Build stalled (no output for {stall_timeout_s}s)\n"
+                break
             if not line:
                 break
             yield line.decode()
+
+        if timed_out:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.wait()
+            return
 
         await process.wait()
         if process.returncode == 0:

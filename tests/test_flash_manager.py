@@ -1,7 +1,6 @@
 import pytest
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
-from typing import List, Dict
 from backend.flash_manager import FlashManager
 
 # Test for Issue #4: Failure to resolve new Katapult ID
