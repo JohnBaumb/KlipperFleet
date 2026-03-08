@@ -37,6 +37,7 @@ except Exception:
 async def lifespan(application: FastAPI):
     """Startup / shutdown hooks for KlipperFleet."""
     await _migrate_moonraker_conf()
+    await _ensure_sudoers()
     await _ensure_system_deps()
     yield
 
@@ -113,6 +114,28 @@ async def _migrate_moonraker_conf() -> None:
                         "Moonraker will pick up the changes on its next restart.")
     except Exception:
         logger.debug("moonraker.conf migration check skipped (non-fatal)", exc_info=True)
+
+
+async def _ensure_sudoers() -> None:
+    """Create the sudoers file if missing (handles upgrades from versions that didn't ship it)."""
+    if os.path.isfile("/etc/sudoers.d/klipperfleet"):
+        return
+    repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script = os.path.join(repo_dir, "install_scripts", "setup_sudoers.py")
+    user = os.environ.get("USER") or os.environ.get("LOGNAME") or "pi"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "sudo", "python3", script, user,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode == 0:
+            logger.info("Sudoers file was missing — created via setup_sudoers.py.")
+        else:
+            logger.warning(f"Failed to create sudoers file (rc={proc.returncode}): {stderr.decode().strip()}")
+    except Exception:
+        logger.debug("Sudoers self-heal skipped (non-fatal)", exc_info=True)
 
 
 async def _ensure_system_deps() -> None:
