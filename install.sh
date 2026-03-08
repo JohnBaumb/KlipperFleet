@@ -134,7 +134,17 @@ python3 "${SRCDIR}/install_scripts/setup_moonraker.py" "${USER_HOME}/printer_dat
 log_info "Integrating with Mainsail navigation..."
 NAVI_JSON="${MOONRAKER_CONFIG_DIR}/.theme/navi.json"
 mkdir -p "${MOONRAKER_CONFIG_DIR}/.theme"
-python3 "${SRCDIR}/install_scripts/setup_mainsail_navi.py" "$NAVI_JSON" "$(hostname)"
+python3 "${SRCDIR}/install_scripts/setup_mainsail_navi.py" "$NAVI_JSON"
+
+# Deploy redirect shim so the navi link preserves the user's hostname/IP.
+MAINSAIL_ROOT="/home/${USER}/mainsail"
+if [ -d "$MAINSAIL_ROOT" ]; then
+    cp "${SRCDIR}/install_scripts/klipperfleet.html" "$MAINSAIL_ROOT/klipperfleet.html"
+    chown "$USER:$USER_GROUP" "$MAINSAIL_ROOT/klipperfleet.html"
+    chmod 644 "$MAINSAIL_ROOT/klipperfleet.html"
+else
+    log_warn "Mainsail web root not found at $MAINSAIL_ROOT; redirect shim not deployed."
+fi
 
 # Ensure mainsail theme paths are writable by the runtime user.
 if ! chown -R "$USER:$USER_GROUP" "${MOONRAKER_CONFIG_DIR}/.theme"; then
