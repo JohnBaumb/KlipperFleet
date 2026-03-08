@@ -478,7 +478,7 @@
                                     </div>
                                     <div class="mt-3 flex flex-wrap items-center justify-between gap-2">
                                         <div class="flex items-center space-x-4">
-                                            <label v-if="!isProfileLinux(dev)" class="flex items-center space-x-2 cursor-pointer group">
+                                            <label v-if="dev.method !== 'linux' && !isProfileLinux(dev)" class="flex items-center space-x-2 cursor-pointer group">
                                                 <input type="checkbox" v-model="dev.is_katapult" @change="updateFleetDevice(dev)" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500">
                                                 <span class="text-[10px] text-gray-400 group-hover:text-gray-200 uppercase font-bold">Katapult</span>
                                             </label>

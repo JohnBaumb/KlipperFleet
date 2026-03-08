@@ -647,6 +647,16 @@ async def manage_klipper_services(action: str) -> str:
         if not target_services:
             return f">>> No firmware/Moonraker services found to {action}.\n"
         
+        # When starting, ensure klipper-mcu starts before klipper/moonraker
+        # When stopping, reverse the order (klipper/moonraker first, then klipper-mcu)
+        def service_sort_key(s: str) -> int:
+            if "klipper-mcu" in s or "klipper_mcu" in s:
+                return 0 if action == "start" else 2
+            if "klipper" in s and "moonraker" not in s:
+                return 1
+            return 2 if action == "start" else 0
+        target_services.sort(key=service_sort_key)
+        
         for service in target_services:
             cmd: List[str] = ["sudo", "-n", "systemctl", action, service]
             proc: Process = await asyncio.create_subprocess_exec(*cmd)

@@ -1176,6 +1176,22 @@ class FlashManager:
                 yield f">>> WARNING: chmod failed (rc={rc}): {out}\n"
 
             yield ">>> Linux MCU binary installed successfully.\n"
+
+            # 4. Restart klipper-mcu service so it's running before Klipper starts
+            yield ">>> Restarting klipper-mcu.service...\n"
+            rc, out = await self._run_sudo_command(["sudo", "systemctl", "start", "klipper-mcu.service"])
+            if rc != 0 and "not loaded" not in out.lower():
+                yield f">>> WARNING: Could not start klipper-mcu.service (rc={rc}): {out}\n"
+            else:
+                # Wait for the socket to appear so Klipper can connect immediately
+                for _ in range(10):
+                    if os.path.exists("/tmp/klipper_host_mcu"):
+                        break
+                    await asyncio.sleep(0.5)
+                if os.path.exists("/tmp/klipper_host_mcu"):
+                    yield ">>> klipper-mcu.service is running (socket ready).\n"
+                else:
+                    yield ">>> WARNING: klipper-mcu socket did not appear within 5s.\n"
         except Exception as e:
             yield f"!!! Error during Linux MCU installation: {str(e)}\n"
 
