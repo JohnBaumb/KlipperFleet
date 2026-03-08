@@ -345,11 +345,23 @@ class AttachRequest(BaseModel):
 
 @app.get("/api/status")
 async def get_status() -> Dict[str, Any]:
+    repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    commit = "unknown"
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=repo_dir, capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            commit = result.stdout.strip()
+    except Exception:
+        pass
     return {
         "message": "KlipperFleet API is running", 
         "klipper_dir": KLIPPER_DIR,
         "firmware_name": FIRMWARE_NAME,
-        "is_klipper_kconfiglib": kconfig_mgr.is_klipper_kconfiglib
+        "is_klipper_kconfiglib": kconfig_mgr.is_klipper_kconfiglib,
+        "commit": commit
     }
 
 @app.get("/api/health")
@@ -1671,9 +1683,15 @@ async def self_update(background_tasks: BackgroundTasks) -> Dict[str, str]:
     
     try:
         repo_dir = os.path.dirname(os.path.dirname(__file__))
+        branch_proc = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "--abbrev-ref", "HEAD",
+            cwd=repo_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+        )
+        branch_out, _ = await branch_proc.communicate()
+        branch = branch_out.decode().strip() if branch_out else "main"
         fetch_proc = await asyncio.create_subprocess_exec("git", "fetch", "origin", cwd=repo_dir, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         await fetch_proc.wait()
-        reset_proc = await asyncio.create_subprocess_exec("git", "reset", "--hard", "origin/main", cwd=repo_dir, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        reset_proc = await asyncio.create_subprocess_exec("git", "reset", "--hard", f"origin/{branch}", cwd=repo_dir, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         await reset_proc.wait()
     except Exception:
         logger.exception("Git fetch/reset failed during self-update, proceeding with update.sh anyway")
@@ -1683,6 +1701,63 @@ async def self_update(background_tasks: BackgroundTasks) -> Dict[str, str]:
 
     background_tasks.add_task(run_update)
     return {"message": "Update started. The service will restart shortly."}
+
+
+@app.get("/api/update-check")
+async def update_check() -> Dict[str, Any]:
+    """Compares local HEAD against the remote tracking branch."""
+    repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        # Fetch latest
+        fetch = await asyncio.create_subprocess_exec(
+            "git", "fetch", "origin",
+            cwd=repo_dir, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
+        await fetch.wait()
+
+        # Get current branch
+        branch_proc = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "--abbrev-ref", "HEAD",
+            cwd=repo_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+        )
+        branch_out, _ = await branch_proc.communicate()
+        branch = branch_out.decode().strip() if branch_out else "main"
+
+        # Get local and remote HEADs
+        local_proc = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "HEAD",
+            cwd=repo_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+        )
+        local_out, _ = await local_proc.communicate()
+        local_sha = local_out.decode().strip() if local_out else ""
+
+        remote_proc = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", f"origin/{branch}",
+            cwd=repo_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+        )
+        remote_out, _ = await remote_proc.communicate()
+        remote_sha = remote_out.decode().strip() if remote_out else ""
+
+        # Count commits behind
+        behind = 0
+        if local_sha and remote_sha and local_sha != remote_sha:
+            count_proc = await asyncio.create_subprocess_exec(
+                "git", "rev-list", "--count", f"HEAD..origin/{branch}",
+                cwd=repo_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+            )
+            count_out, _ = await count_proc.communicate()
+            behind = int(count_out.decode().strip()) if count_out else 0
+
+        return {
+            "update_available": behind > 0,
+            "commits_behind": behind,
+            "branch": branch,
+            "local_commit": local_sha[:7],
+            "remote_commit": remote_sha[:7]
+        }
+    except Exception:
+        logger.debug("Update check failed", exc_info=True)
+        return {"update_available": False, "commits_behind": 0, "branch": "unknown", "local_commit": "", "remote_commit": ""}
 
 REPO_UI_DIR: str = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ui")
 DATA_UI_DIR: str = os.path.join(DATA_DIR, "ui")

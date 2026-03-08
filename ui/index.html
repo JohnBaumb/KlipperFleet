@@ -55,6 +55,7 @@
                 <button @click="selfUpdate" :disabled="updating" class="w-full text-left p-2 rounded flex items-center text-xs text-gray-300 hover:bg-gray-800 hover:text-white transition-colors">
                     <i class="fas fa-sync-alt mr-2" :class="updating ? 'fa-spin' : ''"></i> 
                     {{ updating ? 'Updating...' : 'Update KlipperFleet' }}
+                    <span v-if="updateAvailable" class="ml-auto mr-1 bg-blue-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full" :title="commitsBehind + ' commit(s) behind remote'">{{ commitsBehind }}</span>
                     <i v-if="healthChecked && healthIssues.length > 0" 
                        class="fas fa-exclamation-circle ml-auto text-orange-400 cursor-help"
                        :title="healthIssues.join('\n')"></i>
@@ -66,7 +67,7 @@
                     <i class="fas fa-exclamation-triangle mr-1"></i>
                     Using system kconfiglib. Please click Update to switch to {{ firmwareName }}'s version for full compatibility.
                 </div>
-                <div class="text-[10px] text-gray-500">v1.2.0-alpha</div>
+                <div class="text-[10px] text-gray-500">v1.2.0-alpha <span v-if="currentCommit" class="text-gray-600">{{ currentCommit }}</span></div>
             </div>
         </aside>
 
@@ -695,6 +696,9 @@
                 const updating = ref(false);
                 const healthIssues = ref([]);
                 const healthChecked = ref(false);
+                const updateAvailable = ref(false);
+                const commitsBehind = ref(0);
+                const currentCommit = ref('');
                 const querying = ref(false);
                 const printing = ref(false);
                 const printState = ref('');
@@ -1009,6 +1013,7 @@
                         const data = await res.json();
                         isKlipperKconfiglib.value = data.is_klipper_kconfiglib;
                         firmwareName.value = data.firmware_name || 'Klipper';
+                        currentCommit.value = data.commit || '';
                         await fetchKlipperVersion();
                     } catch (e) {
                         console.error("Failed to fetch system status", e);
@@ -1594,6 +1599,17 @@
                     }
                 };
 
+                const fetchUpdateCheck = async () => {
+                    try {
+                        const res = await fetch('/api/update-check');
+                        const data = await res.json();
+                        updateAvailable.value = data.update_available || false;
+                        commitsBehind.value = data.commits_behind || 0;
+                    } catch (e) {
+                        console.error('Update check failed', e);
+                    }
+                };
+
                 const selfUpdate = async () => {
                     if (!await showConfirm("Self Update", "This will pull the latest changes and restart the service. Continue?")) return;
                     updating.value = true;
@@ -1652,6 +1668,7 @@
                     discoverDevices();
                     fetchSystemStatus();
                     fetchHealth();
+                    fetchUpdateCheck();
                     
                     // Refresh fleet status every 30 seconds (with error backoff)
                     let fleetErrors = 0;
@@ -1723,7 +1740,8 @@
                     services, manageServices, cancelTask, currentTaskId,
                     showRawSymbolNames, showOptionalFeatures, isKlipperKconfiglib, firmwareName,
                     deviceVersions, systemKlipperVersion, versionMatch, versionColor, versionTitle,
-                    healthIssues, healthChecked
+                    healthIssues, healthChecked,
+                    updateAvailable, commitsBehind, currentCommit
                 };
             }
         }).mount('#app');
