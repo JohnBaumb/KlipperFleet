@@ -1617,7 +1617,7 @@
                 };
 
                 const selfUpdate = async () => {
-                    if (!await showConfirm("Self Update", "This will pull the latest changes and restart the service. Continue?")) return;
+                    if (!await showConfirm("Self Update", "This will update KlipperFleet to the latest version, reinstall dependencies, and restart the service. Continue?")) return;
                     updating.value = true;
                     try {
                         const res = await fetch('/api/self-update', { method: 'POST' });
