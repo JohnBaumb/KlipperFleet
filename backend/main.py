@@ -41,7 +41,7 @@ async def lifespan(application: FastAPI):
     yield
 
 
-app = FastAPI(title="KlipperFleet API", version="1.1.1-alpha", lifespan=lifespan)
+app = FastAPI(title="KlipperFleet API", version="1.2.0-alpha", lifespan=lifespan)
 
 # Configuration
 KLIPPER_DIR: str = os.path.abspath(os.path.expanduser(os.getenv("KLIPPER_DIR", "~/klipper")))
