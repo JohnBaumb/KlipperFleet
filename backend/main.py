@@ -97,17 +97,7 @@ fleet_mgr = FleetManager(DATA_DIR)
 
 
 async def _migrate_moonraker_conf() -> None:
-    """Self-heal moonraker.conf on every startup.
-
-    When Moonraker updates KlipperFleet via git pull, it restarts this
-    service but never executes install.sh.  This hook ensures that
-    moonraker.conf always has the modern declarative dependency lines
-    (virtualenv, requirements, system_dependencies) so that Moonraker
-    installs deps on *future* updates automatically.
-
-    The migration is idempotent — it checks for missing keys and only
-    writes when something actually changed.
-    """
+    """Ensure moonraker.conf has declarative dependency lines on every startup."""
     repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     conf_path = os.path.expanduser("~/printer_data/config/moonraker.conf")
     try:
@@ -126,16 +116,7 @@ async def _migrate_moonraker_conf() -> None:
 
 
 async def _ensure_system_deps() -> None:
-    """Install missing system packages listed in system-dependencies.json.
-
-    Moonraker's declarative system_dependencies only installs *new* entries
-    that appear between git commits.  For users upgrading from a version
-    that lacked system_dependencies entirely (e.g. main → dev), the diff is
-    empty and nothing gets installed.  This hook fills that gap by checking
-    each package and installing any that are missing.
-
-    Runs once at startup, only invokes apt when something is actually absent.
-    """
+    """Install missing system packages listed in system-dependencies.json."""
     repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     deps_file = os.path.join(repo_dir, "install_scripts", "system-dependencies.json")
     try:
@@ -179,14 +160,7 @@ def validate_profile_name(name: str) -> None:
         raise HTTPException(status_code=400, detail=f"Invalid profile name: '{name}'. Only alphanumeric characters, spaces, underscores, hyphens, and dots are allowed.")
 
 def resolve_firmware_path(profile_name: str, method: str) -> Optional[str]:
-    """Resolves the firmware file path for a given profile and flash method.
-    
-    AVR boards (e.g. ATmega2560) only produce .elf/.elf.hex, not .bin.
-    This function implements the correct fallback order:
-      - linux: .elf only
-      - other: .bin -> .elf (whichever exists)
-    Returns None if no firmware file is found.
-    """
+    """Resolve firmware path for a profile. AVR uses .elf, others prefer .bin."""
     if method == "linux":
         path = os.path.join(ARTIFACTS_DIR, f"{profile_name}.elf")
         return path if os.path.exists(path) else None
@@ -199,11 +173,7 @@ def resolve_firmware_path(profile_name: str, method: str) -> Optional[str]:
     return None
 
 def is_avr_profile(profile_name: str) -> bool:
-    """Check if a profile targets an AVR microcontroller (e.g. ATmega2560).
-    
-    Reads the profile's .config and looks for CONFIG_MACH_AVR=y.
-    Returns False if the config can't be read.
-    """
+    """Check if a profile targets an AVR microcontroller."""
     config_path = os.path.join(PROFILES_DIR, f"{profile_name}.config")
     try:
         with open(config_path, 'r') as f:
@@ -481,7 +451,7 @@ async def post_config_tree(preview: ConfigPreview, request: Request) -> List[Dic
     if preview.profile:
         config_path = os.path.join(PROFILES_DIR, f"{preview.profile}.config")
         if not os.path.exists(config_path):
-            raise HTTPException(status_code=404, detail=f"Profile {preview.profile} not found")
+            raise HTTPException(status_code=404, detail=f"Profile '{preview.profile}' not found")
     
     try:
         await kconfig_mgr.load_kconfig(config_path)
@@ -503,9 +473,7 @@ async def post_config_tree(preview: ConfigPreview, request: Request) -> List[Dic
             detail="Kconfig file not found. Ensure your firmware (Klipper/Kalico) is installed and KLIPPER_DIR is set correctly. Run 'echo $KLIPPER_DIR' to verify."
         )
     except Exception as e:
-        import traceback
-        error_detail: str = traceback.format_exc()
-        raise HTTPException(status_code=500, detail=error_detail)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/config/tree")
 async def get_config_tree(request: Request, profile: Optional[str] = None, show_optional: bool = False) -> List[Dict[str, Any]]:
@@ -585,7 +553,7 @@ async def delete_profile(name: str) -> Dict[str, str]:
         os.remove(config_path)
         return {"message": f"Profile {name} deleted successfully"}
     else:
-        raise HTTPException(status_code=404, detail=f"Profile {name} not found")
+        raise HTTPException(status_code=404, detail=f"Profile '{name}' not found")
 
 @app.post("/profiles/{name}/rename")
 async def rename_profile(name: str, body: ProfileRename) -> Dict[str, str]:
@@ -628,7 +596,7 @@ async def build_profile(profile: str) -> StreamingResponse:
 
     config_path: str = os.path.join(PROFILES_DIR, f"{profile}.config")
     if not os.path.exists(config_path):
-        raise HTTPException(status_code=404, detail="Profile not found")
+        raise HTTPException(status_code=404, detail=f"Profile '{profile}' not found")
     
     async def generate() -> AsyncGenerator[str, None]:
         async for log in build_mgr.run_build(config_path):
@@ -660,8 +628,8 @@ async def manage_klipper_services(action: str) -> str:
             proc: Process = await asyncio.create_subprocess_exec(*cmd)
             await proc.wait()
         
-        past_tense_action = f"{action}ped" if action == "stop" else f"{action}ed"
-        return f">>> Successfully {past_tense_action}: {', '.join(target_services)}\n"
+        past_tense = {"stop": "Stopped", "start": "Started", "restart": "Restarted"}
+        return f">>> Successfully {past_tense.get(action, action)}: {', '.join(target_services)}\n"
     except Exception as e:
         return f">>> Error managing services: {str(e)}\n"
 

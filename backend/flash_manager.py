@@ -86,10 +86,8 @@ class FlashManager:
             configured_meta: Optional[Dict[str, str]] = configured_lookup.get(dev) or configured_lookup.get(real_path)
             is_configured: bool = configured_meta is not None
             
-            # If it's a by-id device, it's almost certainly an MCU
+            # Determine mode from the by-id name
             if dev.startswith("/dev/serial/by-id/"):
-                # If it has "klipper" or "kalico" in the name, it's in firmware mode (service)
-                # If it has "katapult" or "canboot", it's in bootloader mode (ready)
                 mode = "ready"
                 dev_lower = dev.lower()
                 if "klipper" in dev_lower or "kalico" in dev_lower:
@@ -104,11 +102,8 @@ class FlashManager:
                 devices.append({"id": dev, "name": name, "type": "usb", "mode": mode})
                 seen_real_paths.add(real_path)
             
-            # If it's a ttyACM/ttyUSB device, we show it if it's NOT already represented by a by-id link
-            # or if it's configured in Klipper.
+            # Skip if already represented by a by-id symlink
             elif dev.startswith("/dev/ttyACM") or dev.startswith("/dev/ttyUSB"):
-                # Check if this physical device is already in devices via by-id
-                # (This is a bit tricky, but usually by-id is a symlink to ttyACM/USB)
                 already_added = real_path in seen_real_paths
                 
                 if not already_added:
@@ -187,12 +182,10 @@ class FlashManager:
                         if "[" in line and "]" in line:
                             vid_pid = line.split("[")[1].split("]")[0]
 
-                        # Extract serial
                         serial: str = ""
                         if 'serial="' in line:
                             serial = line.split('serial="')[1].split('"')[0]
 
-                        # Extract path
                         path: str = ""
                         if 'path="' in line:
                             path = line.split('path="')[1].split('"')[0]
@@ -201,11 +194,10 @@ class FlashManager:
                         if serial:
                             name += f" S/N: {serial}"
 
-                        # We use the serial or path as the ID for disambiguation.
-                        # If serial is "UNKNOWN" or empty, we MUST use the path.
+                        # Use serial or path as ID for disambiguation
                         dev_id: str = serial if (serial and serial != "UNKNOWN") else path
 
-                        # Deduplicate: dfu-util -l lists multiple alt settings for the same device
+                        # Deduplicate (dfu-util lists multiple alt settings per device)
                         if any(d['id'] == dev_id for d in devices):
                             continue
 
@@ -368,13 +360,7 @@ class FlashManager:
         return versions
 
     async def check_printer_printing(self) -> Dict[str, Any]:
-        """Queries Moonraker's print_stats to determine if a print is in progress.
-        
-        Returns a dict with:
-          - printing (bool): True if the printer is actively printing or paused.
-          - state (str): The raw print_stats state (e.g. 'printing', 'paused', 'standby', 'complete', 'error', 'unknown').
-          - filename (str): The filename being printed, if any.
-        """
+        """Queries Moonraker to check if a print is in progress."""
         try:
             async with httpx.AsyncClient() as client:
                 response: httpx.Response = await client.get(
@@ -525,7 +511,6 @@ class FlashManager:
                 moonraker_res: Dict[str, Dict[str, str]] = await self._get_moonraker_mcus()
 
             # Merge results (Priority: Katapult > Klipper > Moonraker)
-            # 1. Katapult results (most accurate for bootloader status)
             for uuid, app in katapult_res:
                 # If application is Klipper, it's in service. If Katapult/CanBoot, it's ready.
                 mode: str = "ready" if app.lower() in ["katapult", "canboot"] else "service"
@@ -537,7 +522,6 @@ class FlashManager:
                     "interface": interface
                 }
 
-            # 2. Klipper results
             for uuid, app in klipper_res:
                 if uuid not in seen_uuids:
                     seen_uuids[uuid] = {
@@ -548,7 +532,7 @@ class FlashManager:
                         "interface": interface
                     }
 
-            # 3. Moonraker results (name enrichment and fallback)
+            # Moonraker: name enrichment and fallback
             if isinstance(moonraker_res, dict):
                 for identifier, info in moonraker_res.items():
                     # Check if identifier looks like a UUID (12 hex chars)
@@ -1008,18 +992,11 @@ print(f"Jump command sent to UUID {device_id}")
             yield line
 
     async def flash_avr(self, device_id: str, firmware_path: str, config_path: str) -> AsyncGenerator[str, None]:
-        """Flashes an AVR device (e.g. ATmega2560) using Klipper's 'make flash'.
-
-        This delegates to Klipper's Makefile which knows the correct avrdude
-        parameters (MCU type, programmer, baud rate) from the Kconfig profile.
-        The .config is copied into the klipper directory so 'make flash' picks
-        up the right board settings.
-        """
+        """Flashes an AVR device using Klipper's 'make flash'."""
         import shutil
         yield f">>> Flashing AVR device {device_id} via avrdude (make flash)...\n"
 
-        # Copy the profile .config into the klipper directory so make flash
-        # uses the correct board settings (MCU type, programmer, etc.).
+        # Copy the profile .config into klipper dir for make flash
         tmp_config: str = os.path.join(self.klipper_dir, ".config")
         try:
             shutil.copy(config_path, tmp_config)
@@ -1087,10 +1064,9 @@ print(f"Jump command sent to UUID {device_id}")
             # We try to be specific if we have a serial or path
             # device_id here could be the serial number or the path from discover_dfu_devices
 
-            # STRATEGY: We perform the download WITHOUT the :leave modifier first.
-            # Some STM32 bootloaders (like F446) can timeout on the 'get_status' call
-            # after a long erase/write if the :leave modifier is present.
-            # We also avoid mass-erase by default to preserve bootloaders.
+            # STRATEGY: Download WITHOUT :leave first, then issue a separate
+            # DFU detach. Some STM32 bootloaders timeout on get_status after
+            # long erase/write when :leave is present.
             cmd: List[str] = ["sudo", "dfu-util", "-a", "0", "-d", "0483:df11", "-s", address, "-D", firmware_path]
 
             # If device_id looks like a serial number (usually alphanumeric, long)

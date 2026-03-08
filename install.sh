@@ -2,7 +2,6 @@
 set -Eeuo pipefail
 
 # KlipperFleet Installer
-# Inspired by KRASH and TMC Autotune installers
 
 log_info() { echo "KlipperFleet: $*"; }
 log_warn() { echo "KlipperFleet: WARNING: $*" >&2; }

@@ -251,11 +251,9 @@ class KconfigManager:
                         break
             entry["value"] = selected
 
-            # HIDE REDUNDANT CHOICES:
-            # If there's only one visible option and it's already selected, hide the choice.
+            # Hide single-option or empty choices that are already selected
             if len(visible_choices) == 1 and selected == visible_choices[0]["name"]:
                 entry["visible"] = False
-            # Also hide if NO options are visible (shouldn't happen but for safety)
             elif len(visible_choices) == 0:
                 entry["visible"] = False
 
@@ -286,9 +284,7 @@ class KconfigManager:
         if name and name in self.kconf.syms:
             sym = self.kconf.syms[name]
             
-            # CRITICAL: Only apply the value if the symbol is currently visible.
-            # This prevents "ghost" values from previous architectures (like STM32 CAN pins)
-            # from being applied and triggering 'select' dependencies when they shouldn't.
+            # Skip invisible symbols to prevent stale values from triggering dependencies
             if sym.visibility == 0:
                 return
 
