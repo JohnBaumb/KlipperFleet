@@ -67,7 +67,11 @@
                     <i class="fas fa-exclamation-triangle mr-1"></i>
                     Using system kconfiglib. Please click Update to switch to {{ firmwareName }}'s version for full compatibility.
                 </div>
-                <div class="text-[10px] text-gray-500">v1.2.0-alpha <span v-if="currentCommit" class="text-gray-600">{{ currentCommit }}</span></div>
+                <div class="flex items-center text-[10px] text-gray-500">
+                    <span>v1.2.0-alpha</span>
+                    <span v-if="currentBranch && currentBranch !== 'main'" class="ml-1 text-yellow-500">({{ currentBranch }})</span>
+                    <span v-if="currentCommit" class="ml-auto text-gray-600">{{ currentCommit }}</span>
+                </div>
             </div>
         </aside>
 
@@ -699,6 +703,7 @@
                 const updateAvailable = ref(false);
                 const commitsBehind = ref(0);
                 const currentCommit = ref('');
+                const currentBranch = ref('');
                 const querying = ref(false);
                 const printing = ref(false);
                 const printState = ref('');
@@ -1014,6 +1019,7 @@
                         isKlipperKconfiglib.value = data.is_klipper_kconfiglib;
                         firmwareName.value = data.firmware_name || 'Klipper';
                         currentCommit.value = data.commit || '';
+                        currentBranch.value = data.branch || '';
                         await fetchKlipperVersion();
                     } catch (e) {
                         console.error("Failed to fetch system status", e);
@@ -1741,7 +1747,7 @@
                     showRawSymbolNames, showOptionalFeatures, isKlipperKconfiglib, firmwareName,
                     deviceVersions, systemKlipperVersion, versionMatch, versionColor, versionTitle,
                     healthIssues, healthChecked,
-                    updateAvailable, commitsBehind, currentCommit
+                    updateAvailable, commitsBehind, currentCommit, currentBranch
                 };
             }
         }).mount('#app');

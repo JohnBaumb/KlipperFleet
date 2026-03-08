@@ -347,6 +347,7 @@ class AttachRequest(BaseModel):
 async def get_status() -> Dict[str, Any]:
     repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     commit = "unknown"
+    branch = "unknown"
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -354,6 +355,12 @@ async def get_status() -> Dict[str, Any]:
         )
         if result.returncode == 0:
             commit = result.stdout.strip()
+        br = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_dir, capture_output=True, text=True, timeout=5
+        )
+        if br.returncode == 0:
+            branch = br.stdout.strip()
     except Exception:
         pass
     return {
@@ -361,7 +368,8 @@ async def get_status() -> Dict[str, Any]:
         "klipper_dir": KLIPPER_DIR,
         "firmware_name": FIRMWARE_NAME,
         "is_klipper_kconfiglib": kconfig_mgr.is_klipper_kconfiglib,
-        "commit": commit
+        "commit": commit,
+        "branch": branch
     }
 
 @app.get("/api/health")
