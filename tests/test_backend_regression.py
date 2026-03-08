@@ -382,19 +382,21 @@ class TestKconfigManagerLock:
 
 
 class TestCanRebootScriptSafety:
-    """Bug #11: CAN reboot inline script should not embed device_id via f-string."""
+    """Bug #11: CAN reboot should not embed device_id via f-string or inline scripts."""
 
-    def test_script_uses_sys_argv(self):
-        """The inline Python script should read from sys.argv, not f-string."""
+    def test_no_inline_python_scripts(self):
+        """reboot_device should use katapult_protocol module, not inline Python."""
         import inspect
         from backend.flash_manager import FlashManager
         source = inspect.getsource(FlashManager.reboot_device)
-        # Should contain sys.argv references
-        assert "sys.argv[1]" in source or "sys.argv" in source
-        # Should NOT contain f-string interpolation of device_id in the script body
-        # The old code had: bytes.fromhex("{device_id}") — check it's gone
+        # Should NOT contain inline Python script strings
+        assert 'py_cmd' not in source
+        assert 'python3", "-c"' not in source
+        # Should NOT contain f-string interpolation of device_id in script body
         assert 'bytes.fromhex("{device_id}")' not in source
         assert 's.bind(("{interface}",))' not in source
+        # Should reference the katapult_protocol module
+        assert 'katapult_protocol' in source
 
 
 # ---------------------------------------------------------------------------

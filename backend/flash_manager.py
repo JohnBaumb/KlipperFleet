@@ -679,7 +679,7 @@ class FlashManager:
         
         return device_id
 
-    async def check_device_status(self, device_id: str, method: str, dfu_id: Optional[str] = None, skip_moonraker: bool = False, is_bridge: bool = False, interface: str = "can0") -> str:
+    async def check_device_status(self, device_id: str, method: str, dfu_id: Optional[str] = None, skip_moonraker: bool = False, is_bridge: bool = False, interface: str = "can0", serial_id: Optional[str] = None) -> str:
         """Checks if a device is reachable and its current mode."""
         method = method.lower()
         
@@ -687,6 +687,12 @@ class FlashManager:
         if is_bridge:
             # 1. Check if it's in Katapult mode (Serial)
             serials = await self.discover_serial_devices(skip_moonraker=True)
+            serial_ids = [s['id'] for s in serials]
+            
+            # Direct match using known serial_id (e.g. CAN bridges with a serial Katapult path)
+            if serial_id and serial_id in serial_ids:
+                return "ready"
+            
             target_serial = self._extract_serial_from_id(device_id)
             for s in serials:
                 # Match by ID exactly
@@ -778,7 +784,7 @@ class FlashManager:
             return "service" if os.path.exists("/tmp/klipper_host_mcu") else "ready"
         return "unknown"
 
-    async def reboot_device(self, device_id: str, mode: str = "katapult", method: str = "can", interface: str = "can0", is_bridge: bool = False) -> AsyncGenerator[str, None]:
+    async def reboot_device(self, device_id: str, mode: str = "katapult", method: str = "can", interface: str = "can0", is_bridge: bool = False, serial_id: Optional[str] = None) -> AsyncGenerator[str, None]:
         """Reboots a device, either to Katapult, DFU, or a regular reboot."""
         if mode == "katapult":
             async for line in self.reboot_to_katapult(device_id, method=method, interface=interface, is_bridge=is_bridge):
@@ -799,57 +805,26 @@ class FlashManager:
                     yield f">>> Detected {device_id} in DFU mode. Using DFU reboot.\n"
 
             if method == "can":
-                yield f">>> Requesting regular reboot for {device_id}...\n"
-                # Regular reboot (Return to Service)
-                # We send a Katapult 'COMPLETE' command to jump to the application.
-                # This requires assigning a temporary node ID first.
-                # Pass device_id and interface as command-line args to avoid injection.
-                py_cmd: str = """
-import socket
-import struct
-import sys
-import time
-
-interface = sys.argv[1]
-device_id = sys.argv[2]
-
-def crc16_ccitt(buf):
-    crc = 0xffff
-    for data in buf:
-        data ^= crc & 0xff
-        data ^= (data & 0x0f) << 4
-        crc = ((data << 8) | (crc >> 8)) ^ (data >> 4) ^ (data << 3)
-    return crc & 0xFFFF
-
-def send_can(id, data):
-    try:
-        with socket.socket(socket.AF_CAN, socket.SOCK_RAW, socket.CAN_RAW) as s:
-            s.bind((interface,))
-            can_pkt = struct.pack("<IB3x8s", id, len(data), data.ljust(8, b'\\x00'))
-            s.send(can_pkt)
-    except Exception as e:
-        print(f"Socket error: {e}")
-
-uuid_bytes = bytes.fromhex(device_id)
-
-set_id_payload = bytes([0x11]) + uuid_bytes + bytes([128])
-send_can(0x3f0, set_id_payload)
-time.sleep(0.1)
-
-cmd_body = bytes([0x15, 0x00])
-crc = crc16_ccitt(cmd_body)
-pkt = bytes([0x01, 0x88]) + cmd_body + struct.pack("<H", crc) + bytes([0x99, 0x03])
-send_can(0x200, pkt)
-print(f"Jump command sent to UUID {device_id}")
-"""
-                process: Process = await asyncio.create_subprocess_exec(
-                    "python3", "-c", py_cmd, interface, device_id,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT
-                )
-                stdout, _ = await process.communicate()
-                yield stdout.decode()
-                yield ">>> Regular reboot command sent.\n"
+                # CAN bridges in Katapult mode ARE the CAN interface, so can0 won't exist.
+                # Auto-switch to serial if the bridge has a serial_id.
+                if is_bridge and serial_id and not os.path.exists(f"/sys/class/net/{interface}"):
+                    yield f">>> CAN interface {interface} is down (bridge is in bootloader). Falling back to serial.\n"
+                    try:
+                        from backend.katapult_protocol import restart_firmware_serial
+                        result = restart_firmware_serial(serial_id)
+                        yield result + "\n"
+                        yield ">>> Restart command sent via serial. Device should return to firmware.\n"
+                    except Exception as e:
+                        yield f">>> Serial fallback failed: {e}\n"
+                else:
+                    yield f">>> Requesting regular reboot for {device_id}...\n"
+                    try:
+                        from backend.katapult_protocol import restart_firmware_can
+                        result = restart_firmware_can(interface, device_id)
+                        yield result + "\n"
+                        yield ">>> Regular reboot command sent.\n"
+                    except Exception as e:
+                        yield f">>> CAN reboot failed: {e}\n"
             elif method == "dfu":
                 yield f">>> Requesting reboot for DFU device {device_id}...\n"
                 # For STM32 DFU, the most reliable way to "leave" DFU mode without flashing
@@ -879,9 +854,16 @@ print(f"Jump command sent to UUID {device_id}")
                 else:
                     yield ">>> Reboot command failed. The bootloader may not support software reset via DFU.\n"
             else:
-                # For serial, we can try sending the reboot command via flashtool
-                # but usually serial devices jump to app after flash or timeout.
-                yield f">>> Serial device {device_id} will return to service after flash or timeout.\n"
+                # For serial Katapult devices, connect to the bootloader and send
+                # the COMPLETE command which makes Katapult jump to the application.
+                yield f">>> Sending Katapult COMPLETE command to {device_id}...\n"
+                try:
+                    from backend.katapult_protocol import restart_firmware_serial
+                    result = restart_firmware_serial(device_id)
+                    yield result + "\n"
+                    yield ">>> Restart command sent. Device should return to firmware.\n"
+                except Exception as e:
+                    yield f">>> Failed to send restart command: {e}\n"
 
     async def reboot_to_katapult(self, device_id: str, method: str = "can", interface: str = "can0", is_bridge: bool = False, baudrate: int = 250000) -> AsyncGenerator[str, None]:
         """Sends a reboot command to a device to enter Katapult."""

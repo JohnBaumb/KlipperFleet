@@ -571,6 +571,45 @@
                                         </div>
                                     </div>
                                 </div>
+
+                                <!-- Attached Serial Katapult Identity -->
+                                <div v-if="dev.serial_id" class="relative ml-8 mt-2">
+                                    <!-- Connector Line -->
+                                    <div class="absolute -left-5 -top-6 h-10 w-5 border-l-2 border-b-2 border-gray-700 rounded-bl z-0"></div>
+                                    
+                                    <div class="p-4 bg-gray-800 rounded border-l-4 border-blue-500 shadow-lg relative z-10">
+                                        <div class="flex justify-between items-start">
+                                            <div class="flex-1 min-w-0 mr-4">
+                                                <div class="flex items-center space-x-2 mb-1">
+                                                    <i class="fas fa-usb text-xs text-blue-500"></i>
+                                                    <span class="text-[10px] font-bold text-blue-400 uppercase tracking-widest truncate">Serial Katapult Identity</span>
+                                                    <span class="flex-none flex items-center text-[9px] uppercase font-bold" :class="statusColor(dev.serial_status)">
+                                                        <i class="fas fa-circle text-[5px] mr-1"></i> {{ formatStatus(dev.serial_status) }}
+                                                    </span>
+                                                </div>
+                                                <p class="text-sm font-bold text-white opacity-80 truncate">{{ dev.name }} (Serial)</p>
+                                                <p class="text-[10px] text-gray-400 font-mono mt-1 truncate">{{ dev.serial_id }}</p>
+                                            </div>
+                                            <button @click="dev.serial_id = null; updateFleetDevice(dev)" class="flex-none text-gray-500 hover:text-red-400 text-xs transition-colors" title="Detach serial device">
+                                                <i class="fas fa-unlink"></i>
+                                            </button>
+                                        </div>
+                                        <div class="mt-3 flex flex-wrap items-center gap-2">
+                                            <div class="flex items-center space-x-1">
+                                                <span class="text-[9px] text-gray-500 font-bold uppercase">Method:</span>
+                                                <span class="text-[9px] bg-blue-900/30 text-blue-300 px-1.5 py-0.5 rounded border border-blue-500/20 font-bold uppercase tracking-tighter">Serial</span>
+                                            </div>
+                                            <button v-if="dev.serial_status === 'ready'"
+                                                    @click="rebootDevice(dev.serial_id, 'regular', 'serial')" 
+                                                    :disabled="flashing || printing"
+                                                    class="text-[9px] bg-gray-700 hover:bg-gray-600 text-gray-300 px-2 py-0.5 rounded border border-gray-600 font-bold uppercase transition-colors disabled:opacity-50"
+                                                    title="Restart to firmware">
+                                                <i class="fas fa-redo"></i> 
+                                                Restart to Firmware
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -1447,7 +1486,7 @@
                     } finally {
                         flashing.value = false;
                         currentTaskId.value = null;
-                        setTimeout(fetchFleet, 2000);
+                        setTimeout(() => { fetchFleet(); discoverDevices(); }, 2000);
                     }
                 };
 

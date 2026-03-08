@@ -315,6 +315,7 @@ class Device(BaseModel):
     notes: Optional[str] = ""
     is_katapult: bool = True
     is_bridge: bool = False
+    serial_id: Optional[str] = None
     dfu_id: Optional[str] = None
     magic_baud_tested: bool = False
     use_magic_baud: bool = False
@@ -803,8 +804,17 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                         continue
                     
                     # Use cached CAN status if possible
-                    if dev['method'] == 'can':
+                    if dev['method'] == 'can' and not dev.get('is_bridge'):
                         status: str = can_status_map.get(dev['id'], 'offline')
+                    elif dev['method'] == 'can' and dev.get('is_bridge'):
+                        # Bridges need full status check — they may be in serial Katapult mode
+                        status = can_status_map.get(dev['id'])
+                        if not status or status == 'offline':
+                            status = await flash_mgr.check_device_status(
+                                dev['id'], dev['method'], dfu_id=dev.get('dfu_id'),
+                                is_bridge=True, interface=dev.get('interface', 'can0'),
+                                serial_id=dev.get('serial_id')
+                            )
                     else:
                         status: str = await flash_mgr.check_device_status(dev['id'], dev['method'])
                     
@@ -966,7 +976,8 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                         dfu_id=dev.get('dfu_id'), 
                         skip_moonraker=True,
                         is_bridge=dev.get('is_bridge', False),
-                        interface=dev.get('interface', 'can0')
+                        interface=dev.get('interface', 'can0'),
+                        serial_id=dev.get('serial_id')
                     )
                     task_store.update_device_status(task_id, dev['id'], status)
                     
@@ -977,6 +988,14 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                         should_flash = True
                     
                     if should_flash:
+                        # CAN bridge already in Katapult serial mode: switch to serial flash
+                        if dev.get('is_bridge') and dev['method'] == 'can' and status == "ready" and dev.get('serial_id'):
+                            serial_path = dev['serial_id']
+                            if os.path.exists(serial_path):
+                                task_store.add_log(task_id, f">>> Bridge {dev['name']} is already in Katapult mode (serial): {serial_path}\n")
+                                dev['id'] = serial_path
+                                dev['method'] = "serial"
+
                         if dev.get('is_bridge') and status == "service":
                             if dev['method'] == 'dfu':
                                 task_store.add_log(task_id, f">>> Rebooting Bridge Host {dev['name']} to DFU mode...\n")
@@ -1199,6 +1218,11 @@ async def get_fleet(fast: bool = False) -> List[Dict[str, Any]]:
             else:
                 dev['status'] = 'querying'
             
+            if dev.get('serial_id'):
+                if dev['serial_id'] in status_overrides:
+                    dev['serial_status'] = status_overrides[dev['serial_id']]
+                else:
+                    dev['serial_status'] = 'querying'
             if dev.get('dfu_id'):
                 if dev['dfu_id'] in status_overrides:
                     dev['dfu_status'] = status_overrides[dev['dfu_id']]
@@ -1222,9 +1246,24 @@ async def get_fleet(fast: bool = False) -> List[Dict[str, Any]]:
                 dfu_id=dev.get('dfu_id'),
                 skip_moonraker=is_bus_task_running,
                 is_bridge=dev.get('is_bridge', False),
-                interface=dev.get('interface', 'can0')
+                interface=dev.get('interface', 'can0'),
+                serial_id=dev.get('serial_id')
             )
             
+        if dev.get('serial_id'):
+            if dev['serial_id'] in status_overrides:
+                dev['serial_status'] = status_overrides[dev['serial_id']]
+            else:
+                dev['serial_status'] = await flash_mgr.check_device_status(
+                    dev['serial_id'],
+                    "serial",
+                    skip_moonraker=is_task_running
+                )
+            
+            # If serial is offline but parent is in service, mark as inactive
+            if dev['serial_status'] == 'offline' and dev['status'] == 'service':
+                dev['serial_status'] = 'inactive'
+
         if dev.get('dfu_id'):
             if dev['dfu_id'] in status_overrides:
                 dev['dfu_status'] = status_overrides[dev['dfu_id']]
@@ -1257,9 +1296,7 @@ async def post_fleet_attach(req: AttachRequest) -> Dict[str, str]:
             if req.method == 'dfu':
                 dev['dfu_id'] = req.hardware_id
             elif req.method == 'serial':
-                # If we are attaching a serial device to a fleet entry, 
-                # we update the primary ID to the serial path.
-                dev['id'] = req.hardware_id
+                dev['serial_id'] = req.hardware_id
             await fleet_mgr.save_device(dev)
             return {"message": "Device attached"}
     raise HTTPException(status_code=404, detail="Fleet device not found")
@@ -1321,6 +1358,8 @@ async def discover_devices() -> Dict[str, List[Dict[str, Any]]]:
     managed_ids = set()
     for d in fleet:
         managed_ids.add(d['id'])
+        if d.get('serial_id'):
+            managed_ids.add(d['serial_id'])
         if d.get('dfu_id'):
             managed_ids.add(d['dfu_id'])
             
@@ -1364,6 +1403,7 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             baudrate = req.baudrate if req.baudrate else 250000
             is_katapult = True  # Default to True for backward compatibility
             is_bridge = False
+            fleet_serial_id: Optional[str] = None
             try:
                 fleet = await fleet_mgr.get_fleet()
                 for d in fleet:
@@ -1372,6 +1412,7 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                         baudrate = d.get("baudrate", baudrate)
                         is_katapult = d.get("is_katapult", True)
                         is_bridge = d.get("is_bridge", False)
+                        fleet_serial_id = d.get("serial_id")
                         break
             except Exception:
                 logger.warning("Failed to read fleet for device %s, using defaults (interface=%s, baudrate=%s)",
@@ -1386,7 +1427,10 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             new_serial_device: Optional[str] = None
 
             # 1. Check current status
-            status: str = await flash_mgr.check_device_status(req.device_id, req.method, dfu_id=req.dfu_id, interface=interface)
+            status: str = await flash_mgr.check_device_status(
+                req.device_id, req.method, dfu_id=req.dfu_id, interface=interface,
+                is_bridge=is_bridge, serial_id=fleet_serial_id
+            )
             task_store.update_device_status(task_id, req.device_id, status)
             
             # 2. Reboot if in service
@@ -1484,6 +1528,13 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                 target_id = new_serial_device
                 actual_method = "serial"
                 yield f">>> Bridge is now in Katapult mode (serial): {target_id}\n"
+
+            # CAN bridge already in Katapult serial mode (no reboot was needed)
+            if actual_method == "can" and is_bridge and status == "ready" and fleet_serial_id:
+                if os.path.exists(fleet_serial_id):
+                    target_id = fleet_serial_id
+                    actual_method = "serial"
+                    yield f">>> Bridge already in Katapult mode (serial): {target_id}\n"
 
             # Fallback: if device_id is a /dev/ path but method is still CAN, auto-correct.
             if actual_method == "can" and target_id.startswith("/dev/"):
@@ -1594,8 +1645,10 @@ async def reboot_device(device_id: str, mode: str = "katapult", method: Optional
     actual_method: str = method if method else dev.get('method', 'can')
     interface = dev.get('interface', 'can0')
     
+    serial_id: Optional[str] = dev.get('serial_id')
+
     async def generate() -> AsyncGenerator[str, None]:
-        async for log in flash_mgr.reboot_device(device_id, mode, method=actual_method, interface=interface, is_bridge=is_bridge):
+        async for log in flash_mgr.reboot_device(device_id, mode, method=actual_method, interface=interface, is_bridge=is_bridge, serial_id=serial_id):
             if task_store.is_cancelled(task_id): break
             yield log
         task_store.complete_task(task_id)

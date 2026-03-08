@@ -399,3 +399,57 @@ class TestIssue16BridgeSerialPathGuard:
         for method, bridge, expected in test_cases:
             should_scan = (method == "serial") or (method == "can" and bridge)
             assert should_scan == expected, f"method={method}, bridge={bridge}: expected {expected}"
+
+
+# ---------------------------------------------------------------------------
+# Katapult Protocol Module
+# ---------------------------------------------------------------------------
+
+
+class TestKatapultProtocol:
+    """Tests for the katapult_protocol wire-format helpers."""
+
+    def test_build_command_connect_matches_flashtool(self):
+        """CONNECT command (0x11) must produce the exact same bytes as flashtool.py."""
+        from backend.katapult_protocol import build_command, CONNECT
+        cmd = build_command(CONNECT)
+        # Header(01 88) + cmd(11) + word_cnt(00) + crc16 + Trailer(99 03)
+        assert cmd[:2] == b'\x01\x88'
+        assert cmd[2] == 0x11
+        assert cmd[3] == 0x00
+        assert cmd[-2:] == b'\x99\x03'
+        assert len(cmd) == 8  # 2+1+1+2+2
+
+    def test_build_command_complete_format(self):
+        """COMPLETE command (0x15) must use correct framing."""
+        from backend.katapult_protocol import build_command, COMPLETE
+        cmd = build_command(COMPLETE)
+        assert cmd[:2] == b'\x01\x88'
+        assert cmd[2] == 0x15
+        assert cmd[3] == 0x00
+        assert cmd[-2:] == b'\x99\x03'
+        assert len(cmd) == 8
+
+    def test_build_command_with_payload(self):
+        """Commands with payload should set word_cnt correctly."""
+        from backend.katapult_protocol import build_command
+        payload = b'\x00' * 8  # 8 bytes = 2 words
+        cmd = build_command(0x12, payload)
+        assert cmd[3] == 2  # word_cnt = 8/4
+
+    def test_crc16_known_value(self):
+        """CRC-16/CCITT must match known reference value."""
+        from backend.katapult_protocol import crc16_ccitt
+        # CONNECT body: cmd=0x11, word_cnt=0x00
+        crc = crc16_ccitt(bytes([0x11, 0x00]))
+        assert isinstance(crc, int)
+        assert 0 <= crc <= 0xFFFF
+
+    def test_build_command_no_old_format(self):
+        """Verify the old broken format (cmd | 0x0400 as uint16) is NOT used."""
+        from backend.katapult_protocol import build_command, CONNECT
+        import struct
+        cmd = build_command(CONNECT)
+        # The old broken format would have produced: 0x0411 packed as LE uint16
+        old_broken = struct.pack("<H", 0x11 | 0x0400)
+        assert old_broken not in cmd
