@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -5,6 +6,7 @@ from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, AsyncGenerator
 import os
 import asyncio
+import json
 import logging
 import subprocess
 import sys
@@ -31,7 +33,16 @@ except Exception:
     from flash_manager import FlashManager
     from fleet_manager import FleetManager
 
-app = FastAPI(title="KlipperFleet API", version="1.1.1-alpha")
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    """Startup / shutdown hooks for KlipperFleet."""
+    await _migrate_moonraker_conf()
+    await _ensure_sudoers()
+    await _ensure_system_deps()
+    yield
+
+
+app = FastAPI(title="KlipperFleet API", version="1.2.0-alpha", lifespan=lifespan)
 
 # Configuration
 KLIPPER_DIR: str = os.path.abspath(os.path.expanduser(os.getenv("KLIPPER_DIR", "~/klipper")))
@@ -85,6 +96,84 @@ build_mgr = BuildManager(KLIPPER_DIR, ARTIFACTS_DIR)
 flash_mgr = FlashManager(KLIPPER_DIR, KATAPULT_DIR)
 fleet_mgr = FleetManager(DATA_DIR)
 
+
+async def _migrate_moonraker_conf() -> None:
+    """Ensure moonraker.conf has declarative dependency lines on every startup."""
+    repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    conf_path = os.path.expanduser("~/printer_data/config/moonraker.conf")
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "setup_moonraker",
+            os.path.join(repo_dir, "install_scripts", "setup_moonraker.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        if mod.migrate_moonraker_conf(conf_path, repo_dir):
+            logger.info("Migrated moonraker.conf — added virtualenv/requirements/system_dependencies. "
+                        "Moonraker will pick up the changes on its next restart.")
+    except Exception:
+        logger.debug("moonraker.conf migration check skipped (non-fatal)", exc_info=True)
+
+
+async def _ensure_sudoers() -> None:
+    """Create the sudoers file if missing (handles upgrades from versions that didn't ship it)."""
+    if os.path.isfile("/etc/sudoers.d/klipperfleet"):
+        return
+    repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script = os.path.join(repo_dir, "install_scripts", "setup_sudoers.py")
+    user = os.environ.get("USER") or os.environ.get("LOGNAME") or "pi"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "sudo", "python3", script, user,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode == 0:
+            logger.info("Sudoers file was missing — created via setup_sudoers.py.")
+        else:
+            logger.warning(f"Failed to create sudoers file (rc={proc.returncode}): {stderr.decode().strip()}")
+    except Exception:
+        logger.debug("Sudoers self-heal skipped (non-fatal)", exc_info=True)
+
+
+async def _ensure_system_deps() -> None:
+    """Install missing system packages listed in system-dependencies.json."""
+    repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    deps_file = os.path.join(repo_dir, "install_scripts", "system-dependencies.json")
+    try:
+        with open(deps_file, "r") as f:
+            data = json.load(f)
+        packages = data.get("debian", [])
+        missing = []
+        for pkg in packages:
+            check = await asyncio.create_subprocess_exec(
+                "dpkg-query", "-W", "-f=${Status}", pkg,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await check.communicate()
+            status = stdout.decode().strip() if stdout else ""
+            if check.returncode != 0 or "install ok installed" not in status:
+                missing.append(pkg)
+        if not missing:
+            return
+        logger.info(f"Missing system packages detected: {missing}. Installing...")
+        proc = await asyncio.create_subprocess_exec(
+            "sudo", "apt-get", "install", "-y", *missing,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode == 0:
+            logger.info(f"Successfully installed system packages: {missing}")
+        else:
+            logger.warning(f"apt-get install failed (rc={proc.returncode}): {stderr.decode().strip()}")
+    except Exception:
+        logger.debug("System dependency check skipped (non-fatal)", exc_info=True)
+
+
 # Profile name validation: only alphanumeric, underscores, hyphens, and dots
 _PROFILE_NAME_RE = re.compile(r'^[a-zA-Z0-9 _.-]+$')
 
@@ -92,6 +181,28 @@ def validate_profile_name(name: str) -> None:
     """Validates a profile name to prevent path traversal."""
     if not name or not _PROFILE_NAME_RE.match(name) or '..' in name:
         raise HTTPException(status_code=400, detail=f"Invalid profile name: '{name}'. Only alphanumeric characters, spaces, underscores, hyphens, and dots are allowed.")
+
+def resolve_firmware_path(profile_name: str, method: str) -> Optional[str]:
+    """Resolve firmware path for a profile. AVR uses .elf, others prefer .bin."""
+    if method == "linux":
+        path = os.path.join(ARTIFACTS_DIR, f"{profile_name}.elf")
+        return path if os.path.exists(path) else None
+    
+    # Prefer .bin (ARM/STM32 boards), fall back to .elf (AVR boards)
+    for ext in (".bin", ".elf"):
+        path = os.path.join(ARTIFACTS_DIR, f"{profile_name}{ext}")
+        if os.path.exists(path):
+            return path
+    return None
+
+def is_avr_profile(profile_name: str) -> bool:
+    """Check if a profile targets an AVR microcontroller."""
+    config_path = os.path.join(PROFILES_DIR, f"{profile_name}.config")
+    try:
+        with open(config_path, 'r') as f:
+            return "CONFIG_MACH_AVR=y" in f.read()
+    except Exception:
+        return False
 
 def get_flash_offset(profile_name: str) -> str:
     """Extracts the flash offset address from a profile's .config file."""
@@ -202,8 +313,9 @@ class Device(BaseModel):
     interface: Optional[str] = "can0"
     baudrate: Optional[int] = 250000  # Serial baudrate for Katapult flashtool.py (common: 115200, 250000, 500000)
     notes: Optional[str] = ""
-    is_katapult: bool = False
+    is_katapult: bool = True
     is_bridge: bool = False
+    serial_id: Optional[str] = None
     dfu_id: Optional[str] = None
     magic_baud_tested: bool = False
     use_magic_baud: bool = False
@@ -227,12 +339,118 @@ class AttachRequest(BaseModel):
 
 @app.get("/api/status")
 async def get_status() -> Dict[str, Any]:
+    repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    commit = "unknown"
+    branch = "unknown"
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=repo_dir, capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            commit = result.stdout.strip()
+        br = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_dir, capture_output=True, text=True, timeout=5
+        )
+        if br.returncode == 0:
+            branch = br.stdout.strip()
+    except Exception:
+        pass
     return {
         "message": "KlipperFleet API is running", 
         "klipper_dir": KLIPPER_DIR,
         "firmware_name": FIRMWARE_NAME,
-        "is_klipper_kconfiglib": kconfig_mgr.is_klipper_kconfiglib
+        "is_klipper_kconfiglib": kconfig_mgr.is_klipper_kconfiglib,
+        "commit": commit,
+        "branch": branch
     }
+
+@app.get("/api/health")
+async def get_health() -> Dict[str, Any]:
+    """Checks install health: system packages, venv, sudoers, udev, moonraker config."""
+    repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    issues: List[str] = []
+
+    # 1. System packages
+    deps_file = os.path.join(repo_dir, "install_scripts", "system-dependencies.json")
+    try:
+        with open(deps_file, "r") as f:
+            packages = json.load(f).get("debian", [])
+        for pkg in packages:
+            proc = await asyncio.create_subprocess_exec(
+                "dpkg-query", "-W", "-f=${Status}", pkg,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await proc.communicate()
+            status = stdout.decode().strip() if stdout else ""
+            if proc.returncode != 0 or "install ok installed" not in status:
+                issues.append(f"Missing system package: {pkg}")
+    except Exception:
+        issues.append("Cannot read system-dependencies.json")
+
+    # 2. Python venv
+    venv_dir = os.path.join(repo_dir, "venv")
+    if not os.path.isdir(venv_dir):
+        issues.append("Python virtual environment missing")
+    else:
+        # Check pip deps
+        pip_bin = os.path.join(venv_dir, "bin", "pip")
+        if os.path.isfile(pip_bin):
+            req_file = os.path.join(repo_dir, "backend", "requirements.txt")
+            try:
+                with open(req_file, "r") as f:
+                    required = {line.strip().lower() for line in f
+                                if line.strip() and not line.startswith("#")}
+                proc = await asyncio.create_subprocess_exec(
+                    pip_bin, "list", "--format=columns",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                stdout, _ = await proc.communicate()
+                installed = set()
+                for line in stdout.decode().splitlines()[2:]:
+                    parts = line.split()
+                    if parts:
+                        installed.add(parts[0].lower())
+                for pkg in required:
+                    if pkg not in installed:
+                        issues.append(f"Missing pip package: {pkg}")
+            except Exception:
+                pass
+
+    # 3. Sudoers file
+    if not os.path.isfile("/etc/sudoers.d/klipperfleet"):
+        issues.append("Sudoers file missing (/etc/sudoers.d/klipperfleet)")
+
+    # 4. Udev rules
+    if not os.path.isfile("/etc/udev/rules.d/99-stm32-dfu.rules"):
+        issues.append("DFU udev rules missing")
+
+    # 5. Moonraker config
+    conf_path = os.path.expanduser("~/printer_data/config/moonraker.conf")
+    try:
+        with open(conf_path, "r") as f:
+            conf = f.read()
+        if "[update_manager klipperfleet]" in conf:
+            section_start = conf.index("[update_manager klipperfleet]")
+            next_section = conf.find("\n[", section_start + 1)
+            section = conf[section_start:next_section] if next_section != -1 else conf[section_start:]
+            if "install_script:" in section:
+                issues.append("moonraker.conf uses deprecated install_script")
+            for key in ("virtualenv:", "requirements:", "system_dependencies:"):
+                if key not in section:
+                    issues.append(f"moonraker.conf missing {key.rstrip(':')}")
+        else:
+            issues.append("moonraker.conf missing [update_manager klipperfleet] section")
+    except FileNotFoundError:
+        issues.append("moonraker.conf not found")
+    except Exception:
+        pass
+
+    return {"healthy": len(issues) == 0, "issues": issues}
+
 
 @app.get("/api/print_status")
 async def get_print_status() -> Dict[str, Any]:
@@ -257,7 +475,7 @@ async def post_config_tree(preview: ConfigPreview, request: Request) -> List[Dic
     if preview.profile:
         config_path = os.path.join(PROFILES_DIR, f"{preview.profile}.config")
         if not os.path.exists(config_path):
-            raise HTTPException(status_code=404, detail=f"Profile {preview.profile} not found")
+            raise HTTPException(status_code=404, detail=f"Profile '{preview.profile}' not found")
     
     try:
         await kconfig_mgr.load_kconfig(config_path)
@@ -279,9 +497,7 @@ async def post_config_tree(preview: ConfigPreview, request: Request) -> List[Dic
             detail="Kconfig file not found. Ensure your firmware (Klipper/Kalico) is installed and KLIPPER_DIR is set correctly. Run 'echo $KLIPPER_DIR' to verify."
         )
     except Exception as e:
-        import traceback
-        error_detail: str = traceback.format_exc()
-        raise HTTPException(status_code=500, detail=error_detail)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/config/tree")
 async def get_config_tree(request: Request, profile: Optional[str] = None, show_optional: bool = False) -> List[Dict[str, Any]]:
@@ -345,10 +561,11 @@ async def get_profiles_info() -> Dict[str, Dict[str, bool]]:
                 content = fh.read()
                 info[name] = {
                     "is_can_bridge": "CONFIG_USBCANBUS=y" in content,
-                    "is_linux": "CONFIG_MACH_LINUX=y" in content
+                    "is_linux": "CONFIG_MACH_LINUX=y" in content,
+                    "is_avr": "CONFIG_MACH_AVR=y" in content
                 }
         except Exception:
-            info[name] = {"is_can_bridge": False, "is_linux": False}
+            info[name] = {"is_can_bridge": False, "is_linux": False, "is_avr": False}
     return info
 
 @app.delete("/profiles/{name}")
@@ -360,7 +577,7 @@ async def delete_profile(name: str) -> Dict[str, str]:
         os.remove(config_path)
         return {"message": f"Profile {name} deleted successfully"}
     else:
-        raise HTTPException(status_code=404, detail=f"Profile {name} not found")
+        raise HTTPException(status_code=404, detail=f"Profile '{name}' not found")
 
 @app.post("/profiles/{name}/rename")
 async def rename_profile(name: str, body: ProfileRename) -> Dict[str, str]:
@@ -382,15 +599,15 @@ async def rename_profile(name: str, body: ProfileRename) -> Dict[str, str]:
     # Rename the config file
     os.rename(old_path, new_path)
     
-    # Rename any matching artifacts (.bin, .elf)
-    for ext in [".bin", ".elf"]:
+    # Rename any matching artifacts (.bin, .elf, .elf.hex, .build_info.json)
+    for ext in [".bin", ".elf", ".elf.hex", ".build_info.json"]:
         old_artifact = os.path.join(ARTIFACTS_DIR, f"{name}{ext}")
         new_artifact = os.path.join(ARTIFACTS_DIR, f"{body.new_name}{ext}")
         if os.path.exists(old_artifact):
             os.rename(old_artifact, new_artifact)
     
     # Update fleet references
-    fleet_mgr.rename_profile(name, body.new_name)
+    await fleet_mgr.rename_profile(name, body.new_name)
     
     return {"message": f"Profile renamed from '{name}' to '{body.new_name}'"}
 
@@ -403,7 +620,7 @@ async def build_profile(profile: str) -> StreamingResponse:
 
     config_path: str = os.path.join(PROFILES_DIR, f"{profile}.config")
     if not os.path.exists(config_path):
-        raise HTTPException(status_code=404, detail="Profile not found")
+        raise HTTPException(status_code=404, detail=f"Profile '{profile}' not found")
     
     async def generate() -> AsyncGenerator[str, None]:
         async for log in build_mgr.run_build(config_path):
@@ -430,13 +647,23 @@ async def manage_klipper_services(action: str) -> str:
         if not target_services:
             return f">>> No firmware/Moonraker services found to {action}.\n"
         
+        # When starting, ensure klipper-mcu starts before klipper/moonraker
+        # When stopping, reverse the order (klipper/moonraker first, then klipper-mcu)
+        def service_sort_key(s: str) -> int:
+            if "klipper-mcu" in s or "klipper_mcu" in s:
+                return 0 if action == "start" else 2
+            if "klipper" in s and "moonraker" not in s:
+                return 1
+            return 2 if action == "start" else 0
+        target_services.sort(key=service_sort_key)
+        
         for service in target_services:
-            cmd: List[str] = ["sudo", "systemctl", action, service]
+            cmd: List[str] = ["sudo", "-n", "systemctl", action, service]
             proc: Process = await asyncio.create_subprocess_exec(*cmd)
             await proc.wait()
         
-        past_tense_action = f"{action}ped" if action == "stop" else f"{action}ed"
-        return f">>> Successfully {past_tense_action}: {', '.join(target_services)}\n"
+        past_tense = {"stop": "Stopped", "start": "Started", "restart": "Restarted"}
+        return f">>> Successfully {past_tense.get(action, action)}: {', '.join(target_services)}\n"
     except Exception as e:
         return f">>> Error managing services: {str(e)}\n"
 
@@ -506,7 +733,7 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
         flash_results: Dict[str, str] = {}  # device_name -> "SUCCESS"/"SKIPPED"/"FAILED"
         
         try:
-            devices: List[Dict[str, Any]] = fleet_mgr.get_fleet()
+            devices: List[Dict[str, Any]] = await fleet_mgr.get_fleet()
             
             # 1. Build phase
             if "build" in action:
@@ -557,6 +784,24 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                         flash_results[excl_dev['name']] = "EXCLUDED"
                 
                 task_store.add_log(task_id, ">>> Checking device statuses before stopping services...\n")
+
+                # Auto-detect AVR profiles and override is_katapult for devices that target AVR MCUs.
+                # This ensures AVR devices (e.g. ATmega2560) are never sent through the Katapult path,
+                # even if the user hasn't explicitly set is_katapult: false in the fleet.
+                for dev in devices:
+                    if dev.get('profile') and is_avr_profile(dev['profile']):
+                        dev['is_katapult'] = False
+
+                # Issue #16: Auto-correct method for USB-to-CAN bridges whose device_id
+                # is a /dev/ serial path but method is "can".  These bridges connect via
+                # USB and must flash via serial (Katapult) or DFU, never CAN.
+                for dev in devices:
+                    if dev['method'] == 'can' and dev['id'].startswith('/dev/'):
+                        task_store.add_log(task_id, f">>> Auto-correcting method for {dev['name']}: "
+                                           f"{dev['id']} is a serial path, switching from CAN to serial.\n")
+                        dev['method'] = 'serial'
+                        dev['is_katapult'] = True
+
                 # Pre-discover CAN devices while Moonraker is still running to identify "In Service" nodes
                 can_discovery: List[Dict[str, str]] = await flash_mgr.discover_can_devices()
                 can_status_map: Dict[str, str] = {d['id']: d.get('mode', 'offline') for d in can_discovery}
@@ -569,8 +814,17 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                         continue
                     
                     # Use cached CAN status if possible
-                    if dev['method'] == 'can':
+                    if dev['method'] == 'can' and not dev.get('is_bridge'):
                         status: str = can_status_map.get(dev['id'], 'offline')
+                    elif dev['method'] == 'can' and dev.get('is_bridge'):
+                        # Bridges need full status check — they may be in serial Katapult mode
+                        status = can_status_map.get(dev['id'])
+                        if not status or status == 'offline':
+                            status = await flash_mgr.check_device_status(
+                                dev['id'], dev['method'], dfu_id=dev.get('dfu_id'),
+                                is_bridge=True, interface=dev.get('interface', 'can0'),
+                                serial_id=dev.get('serial_id')
+                            )
                     else:
                         status: str = await flash_mgr.check_device_status(dev['id'], dev['method'])
                     
@@ -578,10 +832,15 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                     task_store.update_device_status(task_id, dev['id'], status)
                     
                     if status == "service":
-                        # Reboot non-bridge CAN devices and non-bridge Katapult-capable serial devices.
+                        # Reboot non-bridge devices that need bootloader entry.
+                        # Skip serial devices without Katapult (e.g. AVR boards) — they flash directly.
                         # Bridges are handled in the second phase to avoid killing the CAN bus prematurely.
-                        # We also include serial devices if they are being flashed, as they MUST be in Katapult mode.
-                        if not dev.get('is_bridge') and (dev['method'] == 'can' or dev['method'] == 'serial' or dev['method'] == 'dfu'):
+                        needs_reboot = (
+                            not dev.get('is_bridge')
+                            and dev['method'] in ('can', 'serial', 'dfu')
+                            and not (dev['method'] == 'serial' and not dev.get('is_katapult', True))
+                        )
+                        if needs_reboot:
                             reboot_tasks.append({
                                 "original_id": dev['id'], # Keep the original ID to find it in the devices list
                                 "id": dev['id'], 
@@ -727,7 +986,8 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                         dfu_id=dev.get('dfu_id'), 
                         skip_moonraker=True,
                         is_bridge=dev.get('is_bridge', False),
-                        interface=dev.get('interface', 'can0')
+                        interface=dev.get('interface', 'can0'),
+                        serial_id=dev.get('serial_id')
                     )
                     task_store.update_device_status(task_id, dev['id'], status)
                     
@@ -738,6 +998,14 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                         should_flash = True
                     
                     if should_flash:
+                        # CAN bridge already in Katapult serial mode: switch to serial flash
+                        if dev.get('is_bridge') and dev['method'] == 'can' and status == "ready" and dev.get('serial_id'):
+                            serial_path = dev['serial_id']
+                            if os.path.exists(serial_path):
+                                task_store.add_log(task_id, f">>> Bridge {dev['name']} is already in Katapult mode (serial): {serial_path}\n")
+                                dev['id'] = serial_path
+                                dev['method'] = "serial"
+
                         if dev.get('is_bridge') and status == "service":
                             if dev['method'] == 'dfu':
                                 task_store.add_log(task_id, f">>> Rebooting Bridge Host {dev['name']} to DFU mode...\n")
@@ -810,22 +1078,30 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                                     flash_results[dev['name']] = "FAILED (Katapult timeout)"
                                     continue
 
-                        if status not in ["ready", "dfu"] and dev['method'] != "linux":
+                        # Non-Katapult serial devices (e.g. AVR) flash directly without bootloader
+                        is_direct_serial = dev['method'] == 'serial' and not dev.get('is_katapult', True)
+                        if status not in ["ready", "dfu"] and dev['method'] != "linux" and not is_direct_serial:
                             task_store.add_log(task_id, f"!!! Skipping {dev['name']} ({dev['id']}) - Device is {status}, not ready for flashing.\n")
                             flash_results[dev['name']] = f"SKIPPED ({status})"
                             continue
 
                         task_store.add_log(task_id, f"\n>>> FLASHING {dev['name']} ({dev['id']}) with {dev['profile']}...\n")
-                        firmware_path: str = os.path.join(ARTIFACTS_DIR, f"{dev['profile']}.elf" if dev['method'] == "linux" else f"{dev['profile']}.bin")
+                        firmware_path: Optional[str] = resolve_firmware_path(dev['profile'], dev['method'])
                         
-                        if not os.path.exists(firmware_path):
+                        if firmware_path is None:
                             task_store.add_log(task_id, f"!!! Error: Firmware for {dev['profile']} not found. Skipping.\n")
                             flash_results[dev['name']] = "FAILED (no firmware)"
                             continue
                             
                         task_store.update_device_status(task_id, dev['id'], "flashing")
                         try:
-                            if dev['method'] == "serial":
+                            if dev['method'] == "serial" and not dev.get('is_katapult', True):
+                                # AVR / non-Katapult serial device — flash via avrdude (make flash)
+                                config_path: str = os.path.join(PROFILES_DIR, f"{dev['profile']}.config")
+                                async for log in flash_mgr.flash_avr(dev['id'], firmware_path, config_path):
+                                    if task_store.is_cancelled(task_id): return
+                                    task_store.add_log(task_id, log)
+                            elif dev['method'] == "serial":
                                 # Resolve ID in case it changed during reboot (e.g. Klipper -> Katapult)
                                 resolved_id: str = await flash_mgr.resolve_serial_id(dev['id'])
                                 if resolved_id != dev['id']:
@@ -906,17 +1182,16 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
 
 @app.get("/download/{profile}")
 async def download_firmware(profile: str) -> FileResponse:
-    """Downloads the klipper.bin for the specified profile."""
-    bin_path: str = os.path.join(ARTIFACTS_DIR, f"{profile}.bin")
-    if not os.path.exists(bin_path):
-        bin_path: str = os.path.join(ARTIFACTS_DIR, f"{profile}.elf")
+    """Downloads the firmware binary for the specified profile."""
+    validate_profile_name(profile)
+    fw_path: Optional[str] = resolve_firmware_path(profile, "serial")  # serial triggers .bin->.elf fallback
         
-    if not os.path.exists(bin_path):
+    if fw_path is None:
         raise HTTPException(status_code=404, detail="Firmware binary not found. Please build first.")
     
-    ext: str = ".elf" if bin_path.endswith(".elf") else ".bin"
+    ext: str = os.path.splitext(fw_path)[1]
     return FileResponse(
-        path=bin_path, 
+        path=fw_path, 
         filename=f"{profile}{ext}",
         media_type='application/octet-stream'
     )
@@ -924,7 +1199,7 @@ async def download_firmware(profile: str) -> FileResponse:
 @app.get("/fleet")
 async def get_fleet(fast: bool = False) -> List[Dict[str, Any]]:
     """Returns the registered fleet of devices with status."""
-    fleet: List[Dict[str, Any]] = fleet_mgr.get_fleet()
+    fleet: List[Dict[str, Any]] = await fleet_mgr.get_fleet()
     
     # Check for active tasks to get real-time status overrides
     status_overrides = {}
@@ -953,6 +1228,11 @@ async def get_fleet(fast: bool = False) -> List[Dict[str, Any]]:
             else:
                 dev['status'] = 'querying'
             
+            if dev.get('serial_id'):
+                if dev['serial_id'] in status_overrides:
+                    dev['serial_status'] = status_overrides[dev['serial_id']]
+                else:
+                    dev['serial_status'] = 'querying'
             if dev.get('dfu_id'):
                 if dev['dfu_id'] in status_overrides:
                     dev['dfu_status'] = status_overrides[dev['dfu_id']]
@@ -976,9 +1256,24 @@ async def get_fleet(fast: bool = False) -> List[Dict[str, Any]]:
                 dfu_id=dev.get('dfu_id'),
                 skip_moonraker=is_bus_task_running,
                 is_bridge=dev.get('is_bridge', False),
-                interface=dev.get('interface', 'can0')
+                interface=dev.get('interface', 'can0'),
+                serial_id=dev.get('serial_id')
             )
             
+        if dev.get('serial_id'):
+            if dev['serial_id'] in status_overrides:
+                dev['serial_status'] = status_overrides[dev['serial_id']]
+            else:
+                dev['serial_status'] = await flash_mgr.check_device_status(
+                    dev['serial_id'],
+                    "serial",
+                    skip_moonraker=is_task_running
+                )
+            
+            # If serial is offline but parent is in service, mark as inactive
+            if dev['serial_status'] == 'offline' and dev['status'] == 'service':
+                dev['serial_status'] = 'inactive'
+
         if dev.get('dfu_id'):
             if dev['dfu_id'] in status_overrides:
                 dev['dfu_status'] = status_overrides[dev['dfu_id']]
@@ -999,35 +1294,33 @@ async def get_fleet(fast: bool = False) -> List[Dict[str, Any]]:
 @app.post("/fleet/device")
 async def save_device(device: Device) -> Dict[str, str]:
     """Registers or updates a device in the fleet."""
-    fleet_mgr.save_device(device.dict())
+    await fleet_mgr.save_device(device.dict())
     return {"message": "Device saved to fleet"}
 
 @app.post("/fleet/attach")
 async def post_fleet_attach(req: AttachRequest) -> Dict[str, str]:
     """Attaches a discovered hardware ID to an existing fleet entry."""
-    fleet: List[Dict[str, Any]] = fleet_mgr.get_fleet()
+    fleet: List[Dict[str, Any]] = await fleet_mgr.get_fleet()
     for dev in fleet:
         if dev['id'] == req.fleet_id:
             if req.method == 'dfu':
                 dev['dfu_id'] = req.hardware_id
             elif req.method == 'serial':
-                # If we are attaching a serial device to a fleet entry, 
-                # we update the primary ID to the serial path.
-                dev['id'] = req.hardware_id
-            fleet_mgr.save_device(dev)
+                dev['serial_id'] = req.hardware_id
+            await fleet_mgr.save_device(dev)
             return {"message": "Device attached"}
     raise HTTPException(status_code=404, detail="Fleet device not found")
 
 @app.delete("/fleet/device")
 async def remove_device(device_id: str) -> Dict[str, str]:
     """Removes a device from the fleet."""
-    fleet_mgr.remove_device(device_id)
+    await fleet_mgr.remove_device(device_id)
     return {"message": "Device removed from fleet"}
 
 @app.get("/fleet/versions")
 async def get_fleet_versions() -> Dict[str, Any]:
     """Gets live version information for all fleet devices that are in service."""
-    fleet = fleet_mgr.get_fleet()
+    fleet = await fleet_mgr.get_fleet()
     mcu_versions = await flash_mgr.get_mcu_versions()
     
     version_info: Dict[str, Any] = {}
@@ -1071,10 +1364,12 @@ async def discover_devices() -> Dict[str, List[Dict[str, Any]]]:
     linux_devs: List[Dict[str, Any]] = flash_mgr.discover_linux_process()
     
     # Mark managed devices
-    fleet = fleet_mgr.get_fleet()
+    fleet = await fleet_mgr.get_fleet()
     managed_ids = set()
     for d in fleet:
         managed_ids.add(d['id'])
+        if d.get('serial_id'):
+            managed_ids.add(d['serial_id'])
         if d.get('dfu_id'):
             managed_ids.add(d['dfu_id'])
             
@@ -1100,12 +1395,8 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
     task_store.create_task(task_id)
     task_store.tasks[task_id]["is_bus_task"] = True
 
-    if req.method == "linux":
-        firmware_path: str = os.path.join(ARTIFACTS_DIR, f"{req.profile}.elf")
-    else:
-        firmware_path: str = os.path.join(ARTIFACTS_DIR, f"{req.profile}.bin")
-
-    if not os.path.exists(firmware_path):
+    firmware_path: Optional[str] = resolve_firmware_path(req.profile, req.method)
+    if firmware_path is None:
         raise HTTPException(status_code=400, detail=f"Firmware for profile '{req.profile}' not found. Please build first.")
     
     async def generate() -> AsyncGenerator[str, None]:
@@ -1117,31 +1408,48 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             yield await manage_klipper_services("stop")
             services_stopped = True
 
-            # Query the fleet to determine the interface and baudrate for this device
+            # Query the fleet to determine the interface, baudrate, bridge and katapult settings for this device
             interface = "can0"
             baudrate = req.baudrate if req.baudrate else 250000
+            is_katapult = True  # Default to True for backward compatibility
+            is_bridge = False
+            fleet_serial_id: Optional[str] = None
             try:
-                fleet = fleet_mgr.get_fleet()
+                fleet = await fleet_mgr.get_fleet()
                 for d in fleet:
                     if d.get("id") == req.device_id:
                         interface = d.get("interface", interface)
                         baudrate = d.get("baudrate", baudrate)
+                        is_katapult = d.get("is_katapult", True)
+                        is_bridge = d.get("is_bridge", False)
+                        fleet_serial_id = d.get("serial_id")
                         break
             except Exception:
                 logger.warning("Failed to read fleet for device %s, using defaults (interface=%s, baudrate=%s)",
                                req.device_id, interface, baudrate, exc_info=True)
+
+            # Auto-detect AVR from profile — override is_katapult if profile targets AVR
+            if is_avr_profile(req.profile):
+                is_katapult = False
 
             # Snapshot current serial devices BEFORE reboot (for diff-based detection)
             initial_serials: List[str] = [d['id'] for d in await flash_mgr.discover_serial_devices(skip_moonraker=True)]
             new_serial_device: Optional[str] = None
 
             # 1. Check current status
-            status: str = await flash_mgr.check_device_status(req.device_id, req.method, dfu_id=req.dfu_id, interface=interface)
+            status: str = await flash_mgr.check_device_status(
+                req.device_id, req.method, dfu_id=req.dfu_id, interface=interface,
+                is_bridge=is_bridge, serial_id=fleet_serial_id
+            )
             task_store.update_device_status(task_id, req.device_id, status)
             
             # 2. Reboot if in service
             if status == "service":
-                if req.method == "dfu" or (req.method == "serial" and req.dfu_id):
+                if req.method == "linux":
+                    # Linux MCU doesn't need a reboot - services are already stopped
+                    # and the binary will be installed directly.
+                    yield ">>> Linux MCU: No reboot needed (binary install).\n"
+                elif req.method == "dfu" or (req.method == "serial" and req.dfu_id):
                     if req.use_magic_baud:
                         yield f">>> Rebooting {req.device_id} to DFU mode (Magic Baud)...\n"
                         async for log in flash_mgr.reboot_to_dfu(req.device_id):
@@ -1164,17 +1472,24 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                         if not found:
                             yield "!!! TIMEOUT: DFU device not found. Aborting flash.\n"
                             return
+                elif req.method == "serial" and not is_katapult:
+                    # Non-Katapult serial device (e.g. AVR/ATmega) — no reboot needed.
+                    # Services are already stopped; avrdude will flash directly.
+                    yield f">>> Serial device (no Katapult): Skipping bootloader reboot for {req.device_id}.\n"
                 else:
                     yield f">>> Rebooting {req.device_id} to Katapult mode...\n"
                     async for log in flash_mgr.reboot_to_katapult(req.device_id, method=req.method, baudrate=baudrate):
                         if task_store.is_cancelled(task_id): return
                         yield log
                 
-                yield ">>> Waiting for device to enter bootloader mode...\n"
-                await asyncio.sleep(2) # Initial wait for USB bus to settle
+                if req.method != "linux" and not (req.method == "serial" and not is_katapult):
+                    yield ">>> Waiting for device to enter bootloader mode...\n"
+                    await asyncio.sleep(2) # Initial wait for USB bus to settle
                 
                 # Active wait for bootloader (up to 30s) - check both DFU and new serial devices
-                for _ in range(30):
+                # (Skip entirely for Linux MCU and non-Katapult serial devices - no bootloader transition needed)
+                skip_bootloader_wait = req.method == "linux" or (req.method == "serial" and not is_katapult)
+                for _ in range(30) if not skip_bootloader_wait else []:
                     if task_store.is_cancelled(task_id): return
                     await asyncio.sleep(1)
                     
@@ -1185,8 +1500,10 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                         await asyncio.sleep(1)
                         break
                     
-                    # Check for NEW serial device (Katapult mode) using snapshot diff
-                    if req.method == "serial":
+                    # Check for NEW serial device (Katapult mode) using snapshot diff.
+                    # Issue #16: CAN bridges drop the can0 interface when rebooted to
+                    # Katapult and reappear as USB serial devices.  Detect them here.
+                    if req.method == "serial" or (req.method == "can" and is_bridge):
                         current_serials: List[Dict[str, str]] = await flash_mgr.discover_serial_devices(skip_moonraker=True)
                         current_ids: List[str] = [d['id'] for d in current_serials]
                         
@@ -1213,7 +1530,27 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             # 3. Resolve ID and Method (in case it changed during reboot or is in a different mode)
             target_id: str = req.device_id
             actual_method: str = req.method
-            
+
+            # Issue #16: USB-to-CAN bridges drop the CAN bus when rebooted to
+            # Katapult and reappear as USB serial devices.  If we detected a new
+            # serial device during the wait loop, switch to serial flash.
+            if actual_method == "can" and is_bridge and new_serial_device:
+                target_id = new_serial_device
+                actual_method = "serial"
+                yield f">>> Bridge is now in Katapult mode (serial): {target_id}\n"
+
+            # CAN bridge already in Katapult serial mode (no reboot was needed)
+            if actual_method == "can" and is_bridge and status == "ready" and fleet_serial_id:
+                if os.path.exists(fleet_serial_id):
+                    target_id = fleet_serial_id
+                    actual_method = "serial"
+                    yield f">>> Bridge already in Katapult mode (serial): {target_id}\n"
+
+            # Fallback: if device_id is a /dev/ path but method is still CAN, auto-correct.
+            if actual_method == "can" and target_id.startswith("/dev/"):
+                yield f">>> Auto-correcting: {target_id} is a serial path, switching from CAN to serial flash.\n"
+                actual_method = "serial"
+
             # If the initial check already found it in DFU mode, lock to DFU immediately
             if status == "dfu":
                 resolved_dfu_id: str = await flash_mgr.resolve_dfu_id(req.device_id, known_dfu_id=req.dfu_id)
@@ -1250,7 +1587,13 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             # 4. Flash
             task_store.update_device_status(task_id, req.device_id, "flashing")
             try:
-                if actual_method == "serial":
+                if actual_method == "serial" and not is_katapult:
+                    # AVR / non-Katapult serial device — flash via avrdude (make flash)
+                    config_path: str = os.path.join(PROFILES_DIR, f"{req.profile}.config")
+                    async for log in flash_mgr.flash_avr(target_id, firmware_path, config_path):
+                        if task_store.is_cancelled(task_id): return
+                        yield log
+                elif actual_method == "serial":
                     async for log in flash_mgr.flash_serial(target_id, firmware_path, baudrate=baudrate):
                         if task_store.is_cancelled(task_id): return
                         yield log
@@ -1273,7 +1616,7 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                 # Update version info in fleet after successful flash
                 build_info = build_mgr.get_last_build_info(req.profile)
                 if build_info:
-                    fleet_mgr.update_device_version(req.device_id, build_info)
+                    await fleet_mgr.update_device_version(req.device_id, build_info)
                     yield f">>> Version recorded: {build_info.get('version', 'unknown')} ({build_info.get('commit', 'unknown')})\n"
             except Exception as e:
                 yield f"!!! Error during flash: {str(e)}\n"
@@ -1304,7 +1647,7 @@ async def reboot_device(device_id: str, mode: str = "katapult", method: Optional
     task_store.tasks[task_id]["is_bus_task"] = True
 
     # Find device in fleet to check if it's a bridge
-    fleet: List[Dict[str, Any]] = fleet_mgr.get_fleet()
+    fleet: List[Dict[str, Any]] = await fleet_mgr.get_fleet()
     dev: Dict[str, Any] = next((d for d in fleet if d['id'] == device_id), {})
     is_bridge = dev.get('is_bridge', False)
     
@@ -1312,8 +1655,10 @@ async def reboot_device(device_id: str, mode: str = "katapult", method: Optional
     actual_method: str = method if method else dev.get('method', 'can')
     interface = dev.get('interface', 'can0')
     
+    serial_id: Optional[str] = dev.get('serial_id')
+
     async def generate() -> AsyncGenerator[str, None]:
-        async for log in flash_mgr.reboot_device(device_id, mode, method=actual_method, interface=interface, is_bridge=is_bridge):
+        async for log in flash_mgr.reboot_device(device_id, mode, method=actual_method, interface=interface, is_bridge=is_bridge, serial_id=serial_id):
             if task_store.is_cancelled(task_id): break
             yield log
         task_store.complete_task(task_id)
@@ -1401,9 +1746,15 @@ async def self_update(background_tasks: BackgroundTasks) -> Dict[str, str]:
     
     try:
         repo_dir = os.path.dirname(os.path.dirname(__file__))
+        branch_proc = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "--abbrev-ref", "HEAD",
+            cwd=repo_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+        )
+        branch_out, _ = await branch_proc.communicate()
+        branch = branch_out.decode().strip() if branch_out else "main"
         fetch_proc = await asyncio.create_subprocess_exec("git", "fetch", "origin", cwd=repo_dir, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         await fetch_proc.wait()
-        reset_proc = await asyncio.create_subprocess_exec("git", "reset", "--hard", "origin/main", cwd=repo_dir, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        reset_proc = await asyncio.create_subprocess_exec("git", "reset", "--hard", f"origin/{branch}", cwd=repo_dir, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         await reset_proc.wait()
     except Exception:
         logger.exception("Git fetch/reset failed during self-update, proceeding with update.sh anyway")
@@ -1413,6 +1764,63 @@ async def self_update(background_tasks: BackgroundTasks) -> Dict[str, str]:
 
     background_tasks.add_task(run_update)
     return {"message": "Update started. The service will restart shortly."}
+
+
+@app.get("/api/update-check")
+async def update_check() -> Dict[str, Any]:
+    """Compares local HEAD against the remote tracking branch."""
+    repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        # Fetch latest
+        fetch = await asyncio.create_subprocess_exec(
+            "git", "fetch", "origin",
+            cwd=repo_dir, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
+        await fetch.wait()
+
+        # Get current branch
+        branch_proc = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "--abbrev-ref", "HEAD",
+            cwd=repo_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+        )
+        branch_out, _ = await branch_proc.communicate()
+        branch = branch_out.decode().strip() if branch_out else "main"
+
+        # Get local and remote HEADs
+        local_proc = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "HEAD",
+            cwd=repo_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+        )
+        local_out, _ = await local_proc.communicate()
+        local_sha = local_out.decode().strip() if local_out else ""
+
+        remote_proc = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", f"origin/{branch}",
+            cwd=repo_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+        )
+        remote_out, _ = await remote_proc.communicate()
+        remote_sha = remote_out.decode().strip() if remote_out else ""
+
+        # Count commits behind
+        behind = 0
+        if local_sha and remote_sha and local_sha != remote_sha:
+            count_proc = await asyncio.create_subprocess_exec(
+                "git", "rev-list", "--count", f"HEAD..origin/{branch}",
+                cwd=repo_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+            )
+            count_out, _ = await count_proc.communicate()
+            behind = int(count_out.decode().strip()) if count_out else 0
+
+        return {
+            "update_available": behind > 0,
+            "commits_behind": behind,
+            "branch": branch,
+            "local_commit": local_sha[:7],
+            "remote_commit": remote_sha[:7]
+        }
+    except Exception:
+        logger.debug("Update check failed", exc_info=True)
+        return {"update_available": False, "commits_behind": 0, "branch": "unknown", "local_commit": "", "remote_commit": ""}
 
 REPO_UI_DIR: str = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ui")
 DATA_UI_DIR: str = os.path.join(DATA_DIR, "ui")

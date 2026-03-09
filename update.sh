@@ -1,5 +1,6 @@
 #!/bin/bash
 # KlipperFleet Update Script
+set -Eeuo pipefail
 
 if [ -n "${BASH_SOURCE[0]:-}" ]; then
     SRCDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"

@@ -1,69 +1,60 @@
 # KlipperFleet
 
 > [!WARNING]
-> **ALPHA SOFTWARE**: KlipperFleet is currently in alpha. It has only been tested on specific (listed below) **CAN bus**, **STM32 Serial/DFU** devices, as well as **Linux Process**.
+> **ALPHA SOFTWARE** - Tested on specific CAN bus, STM32 Serial/DFU, and Linux Process devices (see below). Non-Raspberry Pi and Fluidd are unsupported but on the roadmap. Kalico is auto-detected if installed at `~/klipper`.
 >
-> **Non-Raspberry Pi and Fluidd Users**: Be advised these are unsupported at the moment, but on the roadmap for integration and testing later.
->
-> **Kalico Users**: Kalico is supported! KlipperFleet auto-detects Kalico when it's installed in `~/klipper` (the standard Kalico setup). No extra configuration needed.
->
-> Contributions and [bug reports](https://github.com/JohnBaumb/KlipperFleet/issues) are highly appreciated!
+> Contributions and [bug reports](https://github.com/JohnBaumb/KlipperFleet/issues) are appreciated!
 
-KlipperFleet is a "one-stop-shop" for managing Klipper (and Kalico) firmware across your entire fleet of MCUs on a single printer. It provides a modern web interface (integrated into Mainsail) to configure, build, and flash firmware without ever touching the command line.
+KlipperFleet is a web interface (integrated into Mainsail) for configuring, building, and flashing Klipper/Kalico firmware across all MCUs on a printer. No command line needed.
 
 ## Features
 
-- **Dynamic Web Configurator**: Replaces `make menuconfig` with a reactive web form that parses Klipper's source code in real-time.
-- **Fleet Management**: Register all your MCUs (Serial, CAN, or DFU), assign them profiles, and manage them from a single dashboard. DFU IDs can be "attached" to Serial devices, allowing KlipperFleet to track the MCU across reboots and automatically identify it when it enters the bootloader.
-- **Smart Sequencing**: Automatically handles CAN bridge hosts by flashing downstream nodes first, then the bridge host last.
-- **UART Support**: Detects and manages MCUs connected via Raspberry Pi UART (GPIO).
-- **One-Click Batch Operations**: Build firmware for your entire fleet, flash all ready devices, or perform a full "Build & Flash All" with a single click.
-- **Automatic Katapult/DFU Reboot**: Intelligent detection of Klipper vs. Katapult/DFU modes. If a device is in service, KlipperFleet can automatically reboot it into the appropriate bootloader for flashing.
-- **Service Management**: Automatically stops and starts Klipper/Moonraker services during flashing to ensure exclusive access to the bus.
-- **Integrated Flashing**: Flash firmware via Serial, CAN (Katapult), or DFU directly from the browser with real-time log streaming.
-- **Mainsail Integration**: Designed to look and feel like a native part of the Mainsail ecosystem.
+- **Web Configurator**: Replaces `make menuconfig` with a reactive web form parsed from Klipper's Kconfig source.
+- **Fleet Management**: Register MCUs (Serial, CAN, DFU), assign profiles, and attach DFU IDs to Serial devices for cross-reboot tracking.
+- **Smart Sequencing**: Flashes CAN downstream nodes first, bridge hosts last.
+- **UART Support**: Detects MCUs connected via Raspberry Pi UART (GPIO).
+- **Batch Operations**: Build All, Flash Ready, Flash All, or Build & Flash All in one click.
+- **Auto Reboot**: Detects Klipper vs. Katapult/DFU mode and reboots devices into the correct bootloader automatically.
+- **Service Management**: Stops/starts Klipper and Moonraker services during flash operations.
+- **Integrated Flashing**: Flash via Serial, CAN, or DFU from the browser with real-time log streaming.
+- **Mainsail Integration**: Native look and feel within the Mainsail ecosystem.
 
-## Compatibility & Tested Hardware
+## Tested Hardware
 
 > [!IMPORTANT]
-> **KlipperFleet is in Alpha.** While the core logic is robust, hardware-specific quirks exist. The following configurations have been verified. **All other hardware should be considered UNTESTED, and if you run into issues, please open an issue in github so it can be resolved.**
+> All other hardware should be considered **untested**. Please [open an issue](https://github.com/JohnBaumb/KlipperFleet/issues) if you run into problems, or share your results in the [compatibility thread](https://github.com/JohnBaumb/KlipperFleet/discussions/2).
 
-### Tested Hardware
-- **Host MCUs**: Raspberry Pi (Linux Process)
-- **CAN Nodes**: Spider 3 H7, BTT MMBCAN v1
-- **DFU/USB**: Spider 3 (F446) - *Tested with 32KiB bootloader*
-- **Bridges**: Spider 3 H7 (H723) Katapult CAN Bridge mode
-
-### Tested Interfaces
-- **CANbus**: 1Mbit (Katapult & Klipper)
-- **USB**: DFU (Standard STM32 Bootloader)
-- **Serial**: 1200bps "Magic Baud" DFU entry
+| MCU / Board | Connection | Bootloader | Offset | Reported By |
+|-------------|------------|------------|--------|-------------|
+| Raspberry Pi | Linux | N/A | N/A | Developer, Community |
+| Spider 3 H7 (H723) | CAN / CAN Bridge | Katapult | 8KiB | Developer |
+| BTT MMBCAN v1 | CAN | Katapult | 8KiB | Developer |
+| Spider 3 (F446) | DFU (USB) | STM32 DFU | 32KiB | Developer |
+| BTT EBB36 Gen2 | CAN | Katapult | 8KiB | Community |
+| BTT EBB36 v1.2 | CAN | Katapult | 8KiB | Community |
+| BTT Kraken | CAN | Katapult | 128KiB | Community |
+| QIDI Plus 4 Mainboard | USB | Katapult | 32KiB | Community |
+| QIDI Plus 4 Toolhead | USB to UART | Katapult | 8KiB | Community |
+| QIDI Box v2 | USB | Katapult | 32KiB | Community |
+| ToquesCAN | CAN | Katapult | 8KiB | Community |
+| Fysetc Spider V2.2 | UART | Katapult | 32KiB | Community |
 
 ## Screenshots
 
 ### Dashboard
-![Dashboard](https://raw.githubusercontent.com/JohnBaumb/KlipperFleet/main/images/dashboard.png)
+![Dashboard](images/dashboard.png)
 
 ### Configurator
-![Configurator](https://raw.githubusercontent.com/JohnBaumb/KlipperFleet/main/images/configurator.png)
+![Configurator](images/configurator.png)
 
-### Fleet Manager (CAN & DFU Support)
-![Fleet Manager](https://raw.githubusercontent.com/JohnBaumb/KlipperFleet/main/images/fleet_manager.png)
-
-### DFU Device Discovery
-![DFU Discovery](https://raw.githubusercontent.com/JohnBaumb/KlipperFleet/main/images/ender3_fleet_dfu.png)
+### Fleet Manager
+![Fleet Manager](images/fleet_manager.png)
 
 ## Prerequisites
 
-KlipperFleet expects the following projects to be installed in your home directory:
-
-- **Klipper**: Located at `~/klipper`. Used for source code and Kconfig definitions.
-- **Katapult**: Located at `~/katapult`. Used for flashing via `flashtool.py`.
-
-The system also requires:
-- **can-utils**: For managing CAN interfaces.
-- **Python 3.9+**: With `venv` support.
-- **Sudo Access**: The service needs passwordless sudo for `systemctl` (service management) and `ip link` (CAN management).
+- **Klipper** at `~/klipper` and **Katapult** at `~/katapult`
+- **can-utils** (CAN devices only), **Python 3.9+** with `venv`
+- **Passwordless sudo** for `systemctl` and `ip link`
 
 ## Installation
 
@@ -85,9 +76,9 @@ sudo ./install.sh
 
 ## Moonraker Integration
 
-To enable one-click updates and integrate KlipperFleet into your Mainsail sidebar, add the following to your `moonraker.conf`:
+Add the following to `moonraker.conf`:
 
-### 1. Update Manager
+### Update Manager
 ```conf
 [update_manager klipperfleet]
 type: git_repo
@@ -95,67 +86,65 @@ path: ~/KlipperFleet
 origin: https://github.com/JohnBaumb/KlipperFleet.git
 primary_branch: main
 managed_services: klipperfleet
-install_script: install.sh
+virtualenv: ~/KlipperFleet/venv
+requirements: backend/requirements.txt
+system_dependencies: install_scripts/system-dependencies.json
 is_system_service: False
 ```
 
-### 2. Mainsail Sidebar Tab
-The installer automatically integrates KlipperFleet into your Mainsail navigation by modifying `.theme/navi.json`. 
+### Mainsail Sidebar Tab
+The installer auto-configures `.theme/navi.json`. If the entry is missing, add it manually:
 
 > [!TIP]
-> The `.theme` folder is hidden. To see it in the Mainsail file manager, you must enable **Show Hidden Files** in the Mainsail settings.
-
-If the entry does not appear, you can manually add it to `.theme/navi.json`:
+> Enable **Show Hidden Files** in Mainsail settings to see the `.theme` folder.
 
 ```json
 [
-  { 
-    "title": "KlipperFleet", 
-    "href": "http://<your-pi-ip>:8321", 
-    "target": "_self", 
-    "icon": "M20,21V19L17,16H13V13H16V11H13V8H16V6H13V3H11V6H8V8H11V11H8V13H11V16H7L4,19V21H20Z", 
-    "position": 86 
+  {
+    "title": "KlipperFleet",
+    "href": "/klipperfleet.html",
+    "target": "_self",
+    "icon": "M20,21V19L17,16H13V13H16V11H13V8H16V6H13V3H11V6H8V8H11V11H8V13H11V16H7L4,19V21H20Z",
+    "position": 86
   }
 ]
 ```
 
 ## Usage
 
-1. **Configurator**: Go to the Configurator tab, select a profile name, and configure your MCU settings. Click **Save**.
-2. **Fleet Manager**: Go to the Fleet Manager tab and click the **Scan** icon. Add your discovered devices to the fleet and assign them the profiles you created.
-   - **Tip**: Use the **Attach** () button to link a discovered DFU ID to an existing Serial device. This allows KlipperFleet to track the device across reboots and automatically identify it when it enters the bootloader for flashing.
-3. **Dashboard**: 
-   - **Build All**: Compiles firmware for every profile assigned to a device in your fleet.
-   - **Flash Ready**: Flashes all devices currently in Katapult mode.
-   - **Flash All**: Automatically reboots all "In Service" devices into Katapult and flashes them.
-   - **Build & Flash All**: The "One-Click" solution to update your entire printer's firmware in one go.
+1. **Configurator** - Select a profile, configure MCU settings, click **Save**.
+2. **Fleet Manager** - Scan for devices, add them to your fleet, assign profiles. Use **Attach** to link DFU IDs to Serial devices for cross-reboot tracking.
+3. **Dashboard** - **Build All** compiles firmware, **Flash Ready** flashes bootloader-ready devices, **Flash All** reboots and flashes everything, **Build & Flash All** does it all in one click.
 
 ## Technical Details
 
-- **Backend**: FastAPI (Python 3)
-- **Kconfig Engine**: `kconfiglib`
-- **Frontend**: Vue.js 3, Tailwind CSS
-- **Flashing**: Katapult (`flashtool.py`)
+| Component | Technology |
+|-----------|------------|
+| Backend | FastAPI (Python 3) |
+| Kconfig Engine | Klipper's bundled `kconfiglib` |
+| Frontend | Vue.js 3, Tailwind CSS |
+| Flashing | Katapult `flashtool.py`, `dfu-util`, `avrdude` |
 
-### Directory Structure
-KlipperFleet stores its data in `~/printer_data/config/klipperfleet/`:
-- `profiles/`: Saved Kconfig `.config` files.
-- `artifacts/`: Compiled `.bin` and `.elf` firmware files.
-- `fleet.json`: Registry of your devices and their assigned profiles.
+### Flash Method Reference
 
-## Planned For and Upcoming Features
+| Device Type | Method | Reboot Technique | Flash Tool | Firmware Format | ID Type |
+|-------------|--------|------------------|------------|-----------------|--------|
+| CAN Node | `can` | `flashtool.py -r` via CAN | `flashtool.py -f` via CAN | `.bin` | UUID (12 hex chars) |
+| Serial + Katapult | `serial` | 1200bps trick -> flashtool.py -r | `flashtool.py -f -d` via serial | `.bin` | `/dev/serial/by-id/...` |
+| Serial AVR (no Katapult) | `serial` | None (direct flash) | `make flash` (avrdude) | `.elf` | `/dev/ttyUSB0` etc |
+| DFU (STM32) | `dfu` | 1200bps trick or manual | `dfu-util` | `.bin` | Serial number or USB path |
+| Linux Process | `linux` | None | `cp` + service restart | `.elf` | `linux_process` |
+| CAN Bridge (Katapult) | `can`->`serial` | 1200bps trick or flashtool.py -r | `flashtool.py -f -d` via serial | `.bin` | UUID -> `/dev/serial/by-id/...` |
+| CAN Bridge (DFU) | `can`->`dfu` | 1200bps trick | `dfu-util` | `.bin` | UUID -> DFU serial/path |
 
-KlipperFleet is under active development. Here are some of the major features currently in the works:
+### Data Directory
 
-- **Safety & Robustness**:
-  - **Architecture Verification**: Automatic safety checks to verify MCU architecture before flashing.
-  - **Enhanced DFU Handling**: Improved robustness for STM32 DFU mode entry and exit (currently in testing).
-  - **Bridge Recovery**: Intelligent interface recovery and status detection for CAN bridge hosts.
-  - **kconfiglib**: Switch to using klipper's kconfiglib instead of the official kconfiglib to ensure accuracy during builds.
-- **User Experience**:
-  - **One-Click UI Updates**: Integration with Moonraker's update manager for updates directly from the KlipperFleet dashboard.
-  - **Custom Modal System**: Replacing browser prompts with a native-feeling UI for a smoother experience.
-- **Ecosystem Expansion**: Eventual Additions.
-  - **Fluidd Integration**: Seamless integration and UI parity for Fluidd users.
+Stored in `~/printer_data/config/klipperfleet/`: `profiles/` (Kconfig files), `artifacts/` (compiled firmware), `fleet.json` (device registry).
+
+## Roadmap
+
+- Enhanced DFU handling and bridge recovery
+- User wiki with setup guides and troubleshooting, Profile import/export for easy setup of new devices.
+- Fluidd support (confirmed working by adding the Moonraker update manager entry, but no Fluidd sidebar integration yet)
 ## License
 GPLv3

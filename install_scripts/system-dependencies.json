@@ -1,0 +1,9 @@
+{
+    "debian": [
+        "python3-venv",
+        "python3-pip",
+        "git",
+        "dfu-util",
+        "avrdude"
+    ]
+}

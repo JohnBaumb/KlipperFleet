@@ -61,7 +61,17 @@ if [ -d "$KF_DATA_DIR" ]; then
     echo "KlipperFleet: Data directory removed."
 fi
 
-# 5. Remove Moonraker Integration
+# 5. Remove Sudoers File
+echo "KlipperFleet: Removing sudoers configuration..."
+SUDOERS_FILE="/etc/sudoers.d/klipperfleet"
+if [ -f "$SUDOERS_FILE" ]; then
+    rm "$SUDOERS_FILE"
+    echo "KlipperFleet: Sudoers file removed."
+else
+    echo "KlipperFleet: No sudoers file found (skipped)."
+fi
+
+# 6. Remove Moonraker Integration
 echo "KlipperFleet: Removing Moonraker integration..."
 MOONRAKER_CONF="${MOONRAKER_CONFIG_DIR}/moonraker.conf"
 if [ -f "$MOONRAKER_CONF" ]; then
@@ -71,7 +81,7 @@ if [ -f "$MOONRAKER_CONF" ]; then
     echo "KlipperFleet: Moonraker update_manager section removed."
 fi
 
-# 6. Remove Mainsail Navigation Integration
+# 7. Remove Mainsail Navigation Integration
 echo "KlipperFleet: Removing Mainsail navigation entry..."
 NAVI_JSON="${MOONRAKER_CONFIG_DIR}/.theme/navi.json"
 if [ -f "$NAVI_JSON" ]; then

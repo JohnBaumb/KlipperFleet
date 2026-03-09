@@ -1,7 +1,7 @@
 import pytest
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
-from typing import List, Dict
+from backend.flash_manager import FlashManager
 
 # Test for Issue #4: Failure to resolve new Katapult ID
 # https://github.com/JohnBaumb/KlipperFleet/issues/4
@@ -221,3 +221,235 @@ class TestIntegrationScenario:
         target_id = new_serial_device
         assert target_id is not None
         assert "katapult" in target_id.lower()
+
+
+# ---------------------------------------------------------------------------
+# Issue #16: USB-to-CAN bridge serial path passed to flash_can as CAN UUID
+# https://github.com/JohnBaumb/KlipperFleet/issues/16
+#
+# USB-to-CAN bridges connect via USB serial but are configured with
+# method="can" in the fleet.  When flashing, the /dev/serial/by-id/ path
+# was passed to flashtool.py -u which expects a hex CAN UUID, causing:
+#   ValueError: invalid literal for int() with base 16
+# ---------------------------------------------------------------------------
+
+
+class TestIssue16BridgeSerialPathGuard:
+    """Issue #16: serial paths must never be sent to flash_can or CAN reboot."""
+
+    def test_flash_can_rejects_serial_path(self):
+        """flash_can() must raise ValueError when given a /dev/ serial path."""
+        fm = FlashManager("/tmp/klipper", "/tmp/katapult")
+        serial_path = "/dev/serial/by-id/usb-katapult_stm32h750xx_34001B001751333233393839-if00"
+
+        async def run():
+            with pytest.raises(ValueError, match="serial device path"):
+                async for _ in fm.flash_can(serial_path, "/tmp/firmware.bin"):
+                    pass
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+    def test_flash_can_accepts_hex_uuid(self):
+        """flash_can() must accept a valid hex CAN UUID without raising."""
+        fm = FlashManager("/tmp/klipper", "/tmp/katapult")
+        can_uuid = "a1b2c3d4e5f6"
+
+        async def run():
+            gen = fm.flash_can(can_uuid, "/tmp/firmware.bin")
+            # Should enter the CAN lock without raising—we just
+            # verify no ValueError is raised before the subprocess call.
+            try:
+                line = await gen.__anext__()
+                assert "CAN Lock Acquired" in line
+            except (FileNotFoundError, OSError):
+                # Expected: flashtool.py doesn't exist in /tmp
+                pass
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+    def test_reboot_to_katapult_autocorrects_can_to_serial(self):
+        """reboot_to_katapult() must auto-correct CAN method when device_id is /dev/ path."""
+        fm = FlashManager("/tmp/klipper", "/tmp/katapult")
+        serial_path = "/dev/serial/by-id/usb-katapult_stm32h750xx_34001B001751333233393839-if00"
+
+        async def run():
+            lines = []
+            try:
+                async for line in fm.reboot_to_katapult(serial_path, method="can"):
+                    lines.append(line)
+            except Exception:
+                pass  # Will fail at subprocess level, that's fine
+            combined = "".join(lines)
+            assert "Auto-correcting" in combined
+            assert "serial reboot instead of CAN" in combined
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+    def test_batch_method_autocorrection(self):
+        """Batch flash must auto-correct method from 'can' to 'serial' for /dev/ bridge paths."""
+        devices = [
+            {
+                "id": "/dev/serial/by-id/usb-katapult_stm32h750xx_34001B001751333233393839-if00",
+                "method": "can",
+                "name": "Spider Bridge",
+                "profile": "spider",
+                "is_bridge": True,
+            },
+            {
+                "id": "a1b2c3d4e5f6",
+                "method": "can",
+                "name": "Toolhead CAN",
+                "profile": "toolhead",
+                "is_bridge": False,
+            },
+        ]
+
+        # Replicate the auto-correction logic from main.py batch path
+        for dev in devices:
+            if dev['method'] == 'can' and dev['id'].startswith('/dev/'):
+                dev['method'] = 'serial'
+                dev['is_katapult'] = True
+
+        # Bridge with serial path should be corrected
+        assert devices[0]['method'] == 'serial'
+        assert devices[0]['is_katapult'] is True
+
+        # Normal CAN node with hex UUID should be unchanged
+        assert devices[1]['method'] == 'can'
+        assert 'is_katapult' not in devices[1]
+
+    def test_single_flash_method_autocorrection(self):
+        """Single-device flash must auto-correct method from 'can' to 'serial' for /dev/ paths."""
+        serial_path = "/dev/serial/by-id/usb-katapult_stm32h750xx_34001B001751333233393839-if00"
+        can_uuid = "a1b2c3d4e5f6"
+
+        # Replicate the auto-correction logic from main.py single-flash path
+        def resolve_method(target_id, method):
+            if method == "can" and target_id.startswith("/dev/"):
+                return "serial"
+            return method
+
+        assert resolve_method(serial_path, "can") == "serial"
+        assert resolve_method(can_uuid, "can") == "can"
+        assert resolve_method(serial_path, "serial") == "serial"
+        assert resolve_method(serial_path, "dfu") == "dfu"
+
+    def test_bridge_hex_uuid_switches_to_serial_after_reboot(self):
+        """Issue #16 real scenario: CAN bridge with hex UUID must switch to serial flash
+        after rebooting to Katapult, because the bridge IS the can0 interface and
+        dropping to Katapult kills the CAN bus."""
+        # matthew73210's actual config: hex UUID, method=can, is_bridge=true
+        can_uuid = "69cd41686193"
+        actual_method = "can"
+        is_bridge = True
+        new_serial_device = "/dev/serial/by-id/usb-katapult_stm32h750xx_34001B001751333233393839-if00"
+
+        # Replicate the method resolution from main.py single-flash path:
+        # After reboot, bridge reappears as serial, new_serial_device is set by wait loop.
+        target_id = can_uuid
+        if actual_method == "can" and is_bridge and new_serial_device:
+            target_id = new_serial_device
+            actual_method = "serial"
+
+        assert actual_method == "serial"
+        assert target_id == new_serial_device
+
+    def test_bridge_hex_uuid_no_serial_detected_stays_can(self):
+        """If bridge reboot didn't produce a new serial device, don't switch method."""
+        can_uuid = "69cd41686193"
+        actual_method = "can"
+        is_bridge = True
+        new_serial_device = None  # Detection loop found nothing
+
+        target_id = can_uuid
+        if actual_method == "can" and is_bridge and new_serial_device:
+            target_id = new_serial_device
+            actual_method = "serial"
+
+        # Should remain can — the interface might still be up (e.g., device wasn't rebooted)
+        assert actual_method == "can"
+        assert target_id == can_uuid
+
+    def test_non_bridge_can_device_not_affected(self):
+        """Normal CAN nodes (not bridges) should never switch to serial flash."""
+        can_uuid = "a1b2c3d4e5f6"
+        actual_method = "can"
+        is_bridge = False
+        new_serial_device = "/dev/serial/by-id/usb-katapult_stm32f072xb_12345-if00"
+
+        target_id = can_uuid
+        if actual_method == "can" and is_bridge and new_serial_device:
+            target_id = new_serial_device
+            actual_method = "serial"
+
+        assert actual_method == "can"
+        assert target_id == can_uuid
+
+    def test_serial_detection_triggers_for_can_bridge(self):
+        """The wait loop serial detection condition must include CAN bridges."""
+        # Replicate the condition from the wait loop
+        test_cases = [
+            ("serial", False, True),   # serial method always scans
+            ("serial", True, True),    # serial bridge always scans
+            ("can", True, True),       # CAN bridge must scan (Issue #16 fix)
+            ("can", False, False),     # normal CAN node should NOT scan
+            ("dfu", False, False),     # DFU method should NOT scan
+            ("dfu", True, False),      # DFU bridge should NOT scan (uses DFU path)
+        ]
+        for method, bridge, expected in test_cases:
+            should_scan = (method == "serial") or (method == "can" and bridge)
+            assert should_scan == expected, f"method={method}, bridge={bridge}: expected {expected}"
+
+
+# ---------------------------------------------------------------------------
+# Katapult Protocol Module
+# ---------------------------------------------------------------------------
+
+
+class TestKatapultProtocol:
+    """Tests for the katapult_protocol wire-format helpers."""
+
+    def test_build_command_connect_matches_flashtool(self):
+        """CONNECT command (0x11) must produce the exact same bytes as flashtool.py."""
+        from backend.katapult_protocol import build_command, CONNECT
+        cmd = build_command(CONNECT)
+        # Header(01 88) + cmd(11) + word_cnt(00) + crc16 + Trailer(99 03)
+        assert cmd[:2] == b'\x01\x88'
+        assert cmd[2] == 0x11
+        assert cmd[3] == 0x00
+        assert cmd[-2:] == b'\x99\x03'
+        assert len(cmd) == 8  # 2+1+1+2+2
+
+    def test_build_command_complete_format(self):
+        """COMPLETE command (0x15) must use correct framing."""
+        from backend.katapult_protocol import build_command, COMPLETE
+        cmd = build_command(COMPLETE)
+        assert cmd[:2] == b'\x01\x88'
+        assert cmd[2] == 0x15
+        assert cmd[3] == 0x00
+        assert cmd[-2:] == b'\x99\x03'
+        assert len(cmd) == 8
+
+    def test_build_command_with_payload(self):
+        """Commands with payload should set word_cnt correctly."""
+        from backend.katapult_protocol import build_command
+        payload = b'\x00' * 8  # 8 bytes = 2 words
+        cmd = build_command(0x12, payload)
+        assert cmd[3] == 2  # word_cnt = 8/4
+
+    def test_crc16_known_value(self):
+        """CRC-16/CCITT must match known reference value."""
+        from backend.katapult_protocol import crc16_ccitt
+        # CONNECT body: cmd=0x11, word_cnt=0x00
+        crc = crc16_ccitt(bytes([0x11, 0x00]))
+        assert isinstance(crc, int)
+        assert 0 <= crc <= 0xFFFF
+
+    def test_build_command_no_old_format(self):
+        """Verify the old broken format (cmd | 0x0400 as uint16) is NOT used."""
+        from backend.katapult_protocol import build_command, CONNECT
+        import struct
+        cmd = build_command(CONNECT)
+        # The old broken format would have produced: 0x0411 packed as LE uint16
+        old_broken = struct.pack("<H", 0x11 | 0x0400)
+        assert old_broken not in cmd

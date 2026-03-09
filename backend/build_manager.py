@@ -27,7 +27,7 @@ class BuildManager:
                     with open(filepath, "r") as f:
                         self._last_build_info[profile_name] = json.load(f)
         except Exception as e:
-            print(f"Warning: Could not load build info from disk: {e}")
+            logger.warning("Could not load build info from disk: %s", e)
 
     async def get_klipper_version(self) -> Dict[str, str]:
         """Gets the current Klipper git version info."""
@@ -67,7 +67,7 @@ class BuildManager:
                 version_info["date"] = stdout.decode().strip()
                 
         except Exception as e:
-            print(f"Error getting Klipper version: {e}")
+            logger.error("Error getting Klipper version: %s", e)
         return version_info
 
     def get_last_build_info(self, profile: str) -> Optional[Dict[str, Any]]:
@@ -103,21 +103,46 @@ class BuildManager:
             yield f"!!! Error during make olddefconfig: {str(e)}\n"
             return
 
-        # 3. Build
-        yield ">>> Starting build...\n"
+        # 3. Build (use all available CPU cores for faster compilation)
+        nproc = os.cpu_count() or 1
+        yield f">>> Starting build (-j{nproc})...\n"
         process: Process = await asyncio.create_subprocess_exec(
-            "make",
+            "make", f"-j{nproc}",
             cwd=self.klipper_dir,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT
         )
 
         assert process.stdout is not None
+        build_timeout_s = 600  # 10 minutes total
+        stall_timeout_s = 120  # 2 minutes without output
+        start_time = time.monotonic()
+        timed_out = False
         while True:
-            line: bytes = await process.stdout.readline()
+            elapsed = time.monotonic() - start_time
+            if elapsed > build_timeout_s:
+                timed_out = True
+                yield f"!!! Build timed out after {build_timeout_s}s\n"
+                break
+            try:
+                line: bytes = await asyncio.wait_for(
+                    process.stdout.readline(), timeout=stall_timeout_s
+                )
+            except asyncio.TimeoutError:
+                timed_out = True
+                yield f"!!! Build stalled (no output for {stall_timeout_s}s)\n"
+                break
             if not line:
                 break
             yield line.decode()
+
+        if timed_out:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.wait()
+            return
 
         await process.wait()
         if process.returncode == 0:
@@ -130,6 +155,7 @@ class BuildManager:
             # Copy artifacts to persistent storage
             bin_src: str = os.path.join(self.klipper_dir, "out", "klipper.bin")
             elf_src: str = os.path.join(self.klipper_dir, "out", "klipper.elf")
+            hex_src: str = os.path.join(self.klipper_dir, "out", "klipper.elf.hex")
             
             if os.path.exists(bin_src):
                 shutil.copy(bin_src, os.path.join(self.artifacts_dir, f"{profile_name}.bin"))
@@ -137,6 +163,9 @@ class BuildManager:
             if os.path.exists(elf_src):
                 shutil.copy(elf_src, os.path.join(self.artifacts_dir, f"{profile_name}.elf"))
                 yield f">>> Saved artifact: {profile_name}.elf\n"
+            if os.path.exists(hex_src):
+                shutil.copy(hex_src, os.path.join(self.artifacts_dir, f"{profile_name}.elf.hex"))
+                yield f">>> Saved artifact: {profile_name}.elf.hex\n"
             
             # Store build info for later retrieval
             self._last_build_info[profile_name] = {
