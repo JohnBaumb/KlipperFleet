@@ -42,13 +42,13 @@ KlipperFleet is a web interface (integrated into Mainsail) for configuring, buil
 ## Screenshots
 
 ### Dashboard
-![Dashboard](https://raw.githubusercontent.com/JohnBaumb/KlipperFleet/main/images/dashboard.png)
+![Dashboard](images/dashboard.png)
 
 ### Configurator
-![Configurator](https://raw.githubusercontent.com/JohnBaumb/KlipperFleet/main/images/configurator.png)
+![Configurator](images/configurator.png)
 
 ### Fleet Manager
-![Fleet Manager](https://raw.githubusercontent.com/JohnBaumb/KlipperFleet/main/images/fleet_manager.png)
+![Fleet Manager](images/fleet_manager.png)
 
 ## Prerequisites
 
