@@ -973,10 +973,10 @@ class FlashManager:
         async for line in self._run_flash_command(cmd):
             yield line
 
-    async def flash_avr(self, device_id: str, firmware_path: str, config_path: str) -> AsyncGenerator[str, None]:
-        """Flashes an AVR device using Klipper's 'make flash'."""
+    async def flash_make(self, device_id: str, firmware_path: str, config_path: str) -> AsyncGenerator[str, None]:
+        """Flashes a device using Klipper's 'make flash' (handles AVR, RP2040, etc.)."""
         import shutil
-        yield f">>> Flashing AVR device {device_id} via avrdude (make flash)...\n"
+        yield f">>> Flashing {device_id} via make flash...\n"
 
         # Copy the profile .config into klipper dir for make flash
         tmp_config: str = os.path.join(self.klipper_dir, ".config")
@@ -1006,9 +1006,9 @@ class FlashManager:
 
         await process.wait()
         if process.returncode == 0:
-            yield ">>> AVR flash successful!\n"
+            yield ">>> Flashing successful!\n"
         else:
-            yield f">>> AVR flash failed with return code {process.returncode}\n"
+            yield f">>> Flashing failed with return code {process.returncode}\n"
 
     async def flash_can(self, uuid: str, firmware_path: str, interface: str = "can0") -> AsyncGenerator[str, None]:
         """Flashes a device via CAN using Katapult."""

@@ -156,6 +156,7 @@ class BuildManager:
             bin_src: str = os.path.join(self.klipper_dir, "out", "klipper.bin")
             elf_src: str = os.path.join(self.klipper_dir, "out", "klipper.elf")
             hex_src: str = os.path.join(self.klipper_dir, "out", "klipper.elf.hex")
+            uf2_src: str = os.path.join(self.klipper_dir, "out", "klipper.uf2")
             
             if os.path.exists(bin_src):
                 shutil.copy(bin_src, os.path.join(self.artifacts_dir, f"{profile_name}.bin"))
@@ -166,6 +167,9 @@ class BuildManager:
             if os.path.exists(hex_src):
                 shutil.copy(hex_src, os.path.join(self.artifacts_dir, f"{profile_name}.elf.hex"))
                 yield f">>> Saved artifact: {profile_name}.elf.hex\n"
+            if os.path.exists(uf2_src):
+                shutil.copy(uf2_src, os.path.join(self.artifacts_dir, f"{profile_name}.uf2"))
+                yield f">>> Saved artifact: {profile_name}.uf2\n"
             
             # Store build info for later retrieval
             self._last_build_info[profile_name] = {

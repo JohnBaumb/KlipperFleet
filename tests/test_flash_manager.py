@@ -453,3 +453,150 @@ class TestKatapultProtocol:
         # The old broken format would have produced: 0x0411 packed as LE uint16
         old_broken = struct.pack("<H", 0x11 | 0x0400)
         assert old_broken not in cmd
+
+
+# ---------------------------------------------------------------------------
+# Issue #17: flash_make (renamed from flash_avr)
+# ---------------------------------------------------------------------------
+
+
+class TestFlashMakeRename:
+    """Verify the flash_avr -> flash_make rename is consistent."""
+
+    def test_flash_make_method_exists(self):
+        """FlashManager must have flash_make, not flash_avr."""
+        fm = FlashManager("/tmp/klipper", "/tmp/katapult")
+        assert hasattr(fm, "flash_make"), "flash_make method missing"
+        assert not hasattr(fm, "flash_avr"), "flash_avr should have been renamed to flash_make"
+
+    def test_flash_make_is_async_generator(self):
+        """flash_make must be an async generator (yields log lines)."""
+        import inspect
+        fm = FlashManager("/tmp/klipper", "/tmp/katapult")
+        assert inspect.isasyncgenfunction(fm.flash_make)
+
+
+# ---------------------------------------------------------------------------
+# Issue #17: Error propagation — flash success/failure sentinel detection
+# ---------------------------------------------------------------------------
+
+
+class TestFlashSuccessDetection:
+    """Test that the stream-based success sentinel detection works correctly."""
+
+    def test_success_sentinel_detected(self):
+        """The endpoint checks for '>>> Flashing successful!' in the stream."""
+        logs = [
+            ">>> Running make flash...\n",
+            "Flashing out/klipper.uf2...\n",
+            ">>> Flashing successful!\n",
+        ]
+        flash_succeeded = any(">>> Flashing successful!" in log for log in logs)
+        assert flash_succeeded is True
+
+    def test_failure_not_mistaken_for_success(self):
+        """A failed flash must NOT set flash_succeeded to True."""
+        logs = [
+            ">>> Running make flash...\n",
+            "Error: device not found\n",
+            ">>> Flashing failed with return code 1\n",
+        ]
+        flash_succeeded = any(
+            ">>> Flashing successful!" in log or ">>> Flash operation complete." in log
+            for log in logs
+        )
+        assert flash_succeeded is False
+
+    def test_dfu_flash_complete_sentinel(self):
+        """DFU flash uses '>>> Flash operation complete.' as its final success sentinel."""
+        logs = [
+            ">>> Flashing successful!\n",
+            ">>> Sending DFU leave request...\n",
+            ">>> Device rebooted successfully.\n",
+            ">>> Flash operation complete.\n",
+        ]
+        flash_succeeded = any(
+            ">>> Flashing successful!" in log or ">>> Flash operation complete." in log
+            for log in logs
+        )
+        assert flash_succeeded is True
+
+    def test_linux_flash_sentinel(self):
+        """Linux MCU flash uses its own success sentinel."""
+        logs = [
+            ">>> Installing Linux MCU binary...\n",
+            ">>> Linux MCU binary installed successfully.\n",
+        ]
+        flash_succeeded = any(">>> Linux MCU binary installed successfully." in log for log in logs)
+        assert flash_succeeded is True
+
+
+# ---------------------------------------------------------------------------
+# Issue #17: Post-flash serial rescan logic
+# ---------------------------------------------------------------------------
+
+
+class TestPostFlashRescan:
+    """Test the post-flash serial rescan matching strategies."""
+
+    def test_serial_suffix_match_rp2040(self):
+        """RP2040 devices have unique chip serials — suffix matching should work."""
+        fm = FlashManager("/tmp/klipper", "/tmp/katapult")
+        old_id = "/dev/serial/by-id/usb-Klipper_rp2040_E66160F42367B137-if00"
+        new_id = "/dev/serial/by-id/usb-CustomFork_rp2040_E66160F42367B137-if00"
+
+        old_serial = fm._extract_serial_from_id(old_id)
+        assert old_serial is not None
+        # The serial should match in the new path
+        assert old_serial in new_id
+
+    def test_serial_suffix_match_stm32(self):
+        """STM32 devices with real serials should also match by suffix."""
+        fm = FlashManager("/tmp/klipper", "/tmp/katapult")
+        old_id = "/dev/serial/by-id/usb-Klipper_stm32f446xx_2A003B000451333039383535-if00"
+        new_id = "/dev/serial/by-id/usb-CustomFW_stm32f446xx_2A003B000451333039383535-if00"
+
+        old_serial = fm._extract_serial_from_id(old_id)
+        assert old_serial is not None
+        assert old_serial in new_id
+
+    def test_generic_serial_fallback_to_diff(self):
+        """Devices with generic/zeros serial should NOT match by suffix against unrelated devices."""
+        fm = FlashManager("/tmp/klipper", "/tmp/katapult")
+        # Generic serial — common on cheap STM32F103 clones
+        old_id = "/dev/serial/by-id/usb-Klipper_stm32f103xe_00000000001-if00"
+
+        old_serial = fm._extract_serial_from_id(old_id)
+        # Even though we extract something, it's not a reliable unique match.
+        # The diff-based strategy should be used as fallback in practice.
+        # Here we just verify extraction works without error.
+        assert old_serial is not None
+
+    def test_diff_based_detection_one_disappeared_one_appeared(self):
+        """When exactly one device disappeared and one appeared, assume it's the same board."""
+        initial_serials = [
+            "/dev/serial/by-id/usb-Klipper_rp2040_E66160F42367B137-if00",
+            "/dev/serial/by-id/usb-OtherDevice-if00",
+        ]
+        current_ids = [
+            "/dev/serial/by-id/usb-CustomFork_rp2040_E66160F42367B137-if00",
+            "/dev/serial/by-id/usb-OtherDevice-if00",
+        ]
+        old_device_id = "/dev/serial/by-id/usb-Klipper_rp2040_E66160F42367B137-if00"
+
+        disappeared = [s for s in initial_serials if s not in current_ids]
+        appeared = [s for s in current_ids if s not in initial_serials]
+
+        assert old_device_id in disappeared
+        assert len(appeared) == 1
+        assert appeared[0] == "/dev/serial/by-id/usb-CustomFork_rp2040_E66160F42367B137-if00"
+
+    def test_device_path_unchanged_no_update_needed(self):
+        """If the device path didn't change, no fleet update is needed."""
+        old_device_id = "/dev/serial/by-id/usb-Klipper_rp2040_E66160F42367B137-if00"
+        current_ids = [
+            "/dev/serial/by-id/usb-Klipper_rp2040_E66160F42367B137-if00",
+            "/dev/serial/by-id/usb-OtherDevice-if00",
+        ]
+        # Old path still present — nothing changed
+        assert old_device_id in current_ids

@@ -71,6 +71,19 @@ class FleetManager:
                     break
             self._write_fleet(fleet)
 
+    async def update_device_id(self, old_id: str, new_id: str) -> bool:
+        """Updates the device ID in fleet.json when a device re-enumerates with a new path.
+        Returns True if the ID was found and updated."""
+        async with self._lock:
+            with open(self.fleet_file, 'r') as f:
+                fleet: List[Dict[str, Any]] = json.load(f)
+            for d in fleet:
+                if d['id'] == old_id:
+                    d['id'] = new_id
+                    self._write_fleet(fleet)
+                    return True
+            return False
+
     async def update_device_live_version(self, device_id: str, live_version: str) -> None:
         """Updates the live running version for a device (from Moonraker query)."""
         async with self._lock:

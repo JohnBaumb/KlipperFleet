@@ -188,8 +188,8 @@ def resolve_firmware_path(profile_name: str, method: str) -> Optional[str]:
         path = os.path.join(ARTIFACTS_DIR, f"{profile_name}.elf")
         return path if os.path.exists(path) else None
     
-    # Prefer .bin (ARM/STM32 boards), fall back to .elf (AVR boards)
-    for ext in (".bin", ".elf"):
+    # Prefer .bin (ARM/STM32 boards), fall back to .uf2 (RP2040), then .elf (AVR boards)
+    for ext in (".bin", ".uf2", ".elf"):
         path = os.path.join(ARTIFACTS_DIR, f"{profile_name}{ext}")
         if os.path.exists(path):
             return path
@@ -1094,12 +1094,15 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                             continue
                             
                         task_store.update_device_status(task_id, dev['id'], "flashing")
+                        batch_flash_ok = False
                         try:
                             if dev['method'] == "serial" and not dev.get('is_katapult', True):
-                                # AVR / non-Katapult serial device — flash via avrdude (make flash)
+                                # Non-Katapult serial device — flash via make flash (handles AVR, RP2040, etc.)
                                 config_path: str = os.path.join(PROFILES_DIR, f"{dev['profile']}.config")
-                                async for log in flash_mgr.flash_avr(dev['id'], firmware_path, config_path):
+                                async for log in flash_mgr.flash_make(dev['id'], firmware_path, config_path):
                                     if task_store.is_cancelled(task_id): return
+                                    if ">>> Flashing successful!" in log or ">>> Flash operation complete." in log:
+                                        batch_flash_ok = True
                                     task_store.add_log(task_id, log)
                             elif dev['method'] == "serial":
                                 # Resolve ID in case it changed during reboot (e.g. Klipper -> Katapult)
@@ -1109,6 +1112,8 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                                 
                                 async for log in flash_mgr.flash_serial(resolved_id, firmware_path, baudrate=dev.get('baudrate', 250000)):
                                     if task_store.is_cancelled(task_id): return
+                                    if ">>> Flashing successful!" in log:
+                                        batch_flash_ok = True
                                     task_store.add_log(task_id, log)
                             elif dev['method'] == "can":
                                 interface = dev.get('interface', 'can0')
@@ -1116,20 +1121,30 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                                     raise IOError(f"CAN interface ({interface}) is DOWN. Cannot flash device.")
                                 async for log in flash_mgr.flash_can(dev['id'], firmware_path, interface):
                                     if task_store.is_cancelled(task_id): return
+                                    if ">>> Flashing successful!" in log:
+                                        batch_flash_ok = True
                                     task_store.add_log(task_id, log)
                             elif dev['method'] == "dfu":
                                 resolved_id: str = await flash_mgr.resolve_dfu_id(dev['id'], known_dfu_id=dev.get('dfu_id'))
                                 offset: str = get_flash_offset(dev['profile'])
                                 async for log in flash_mgr.flash_dfu(resolved_id, firmware_path, address=offset, leave=dev.get('use_dfu_exit', True)):
                                     if task_store.is_cancelled(task_id): return
+                                    if ">>> Flashing successful!" in log or ">>> Flash operation complete." in log:
+                                        batch_flash_ok = True
                                     task_store.add_log(task_id, log)
                             elif dev['method'] == "linux":
                                 async for log in flash_mgr.flash_linux(firmware_path):
                                     if task_store.is_cancelled(task_id): return
+                                    if ">>> Linux MCU binary installed successfully." in log:
+                                        batch_flash_ok = True
                                     task_store.add_log(task_id, log)
                             
-                            task_store.update_device_status(task_id, dev['id'], "ready")
-                            flash_results[dev['name']] = "SUCCESS"
+                            if batch_flash_ok:
+                                task_store.update_device_status(task_id, dev['id'], "ready")
+                                flash_results[dev['name']] = "SUCCESS"
+                            else:
+                                task_store.update_device_status(task_id, dev['id'], "failed")
+                                flash_results[dev['name']] = "FAILED"
                         except Exception as e:
                             task_store.add_log(task_id, f"!!! Error flashing {dev['name']}: {str(e)}\n")
                             task_store.update_device_status(task_id, dev['id'], "failed")
@@ -1379,6 +1394,55 @@ async def discover_devices() -> Dict[str, List[Dict[str, Any]]]:
 
     return {"serial": serial_devs, "can": can_devs, "dfu": dfu_devs, "linux": linux_devs}
 
+async def _post_flash_rescan(old_device_id: str, initial_serials: List[str]) -> AsyncGenerator[str, None]:
+    """Issue #17: After a successful flash, rescan serial devices and update fleet.json
+    if the USB descriptor (and thus the /dev/serial/by-id/ path) changed.
+    
+    Strategy:
+    1. Match by chip serial suffix (e.g. rp2040_E66160F42367B137) — unique and reliable.
+    2. Fallback: diff-based detection (one device disappeared, one new appeared).
+    3. If ambiguous, log a warning and let the user resolve manually.
+    """
+    current_serials_raw: List[Dict[str, str]] = await flash_mgr.discover_serial_devices(skip_moonraker=True)
+    current_ids: List[str] = [d['id'] for d in current_serials_raw]
+
+    # If the old path still exists, nothing changed
+    if old_device_id in current_ids:
+        return
+
+    # Strategy 1: Match by chip serial suffix
+    old_serial = flash_mgr._extract_serial_from_id(old_device_id)
+    if old_serial:
+        for cid in current_ids:
+            if old_serial in cid:
+                updated = await fleet_mgr.update_device_id(old_device_id, cid)
+                if updated:
+                    yield f">>> Device path changed: {old_device_id} -> {cid}\n"
+                    yield f">>> Fleet updated automatically (matched by serial: {old_serial}).\n"
+                else:
+                    yield f">>> WARNING: Device re-enumerated as {cid} but fleet entry not found for update.\n"
+                return
+
+    # Strategy 2: Diff-based — find which device disappeared and which appeared
+    disappeared = [s for s in initial_serials if s not in current_ids]
+    appeared = [s for s in current_ids if s not in initial_serials]
+
+    if old_device_id in disappeared and len(appeared) == 1:
+        new_id = appeared[0]
+        updated = await fleet_mgr.update_device_id(old_device_id, new_id)
+        if updated:
+            yield f">>> Device path changed: {old_device_id} -> {new_id}\n"
+            yield f">>> Fleet updated automatically (matched by diff: 1 disappeared, 1 appeared).\n"
+        else:
+            yield f">>> WARNING: Device re-enumerated as {new_id} but fleet entry not found for update.\n"
+        return
+
+    # Strategy 3: Ambiguous — warn the user
+    yield f">>> WARNING: Device {old_device_id} did not re-appear after flash.\n"
+    if appeared:
+        yield f">>> New devices detected: {', '.join(appeared)}\n"
+    yield ">>> Please verify fleet.json and update the device ID manually if needed.\n"
+
 @app.post("/flash")
 async def flash_device(req: FlashRequest) -> StreamingResponse:
     """Flashes the specified profile to a device."""
@@ -1586,38 +1650,61 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
 
             # 4. Flash
             task_store.update_device_status(task_id, req.device_id, "flashing")
+            flash_succeeded = False
             try:
                 if actual_method == "serial" and not is_katapult:
-                    # AVR / non-Katapult serial device — flash via avrdude (make flash)
+                    # Non-Katapult serial device — flash via make flash (handles AVR, RP2040, etc.)
                     config_path: str = os.path.join(PROFILES_DIR, f"{req.profile}.config")
-                    async for log in flash_mgr.flash_avr(target_id, firmware_path, config_path):
+                    async for log in flash_mgr.flash_make(target_id, firmware_path, config_path):
                         if task_store.is_cancelled(task_id): return
+                        if ">>> Flashing successful!" in log or ">>> Flash operation complete." in log:
+                            flash_succeeded = True
                         yield log
                 elif actual_method == "serial":
                     async for log in flash_mgr.flash_serial(target_id, firmware_path, baudrate=baudrate):
                         if task_store.is_cancelled(task_id): return
+                        if ">>> Flashing successful!" in log:
+                            flash_succeeded = True
                         yield log
                 elif actual_method == "can":
                     async for log in flash_mgr.flash_can(target_id, firmware_path, interface=interface):
                         if task_store.is_cancelled(task_id): return
+                        if ">>> Flashing successful!" in log:
+                            flash_succeeded = True
                         yield log
                 elif actual_method == "dfu":
                     offset: str = get_flash_offset(req.profile)
                     async for log in flash_mgr.flash_dfu(target_id, firmware_path, address=offset, leave=req.use_dfu_exit if req.use_dfu_exit is not None else True):
                         if task_store.is_cancelled(task_id): return
+                        if ">>> Flashing successful!" in log or ">>> Flash operation complete." in log:
+                            flash_succeeded = True
                         yield log
                 elif actual_method == "linux":
                     async for log in flash_mgr.flash_linux(firmware_path):
                         if task_store.is_cancelled(task_id): return
+                        if ">>> Linux MCU binary installed successfully." in log:
+                            flash_succeeded = True
                         yield log
                 
-                task_store.update_device_status(task_id, req.device_id, "ready")
-                
-                # Update version info in fleet after successful flash
-                build_info = build_mgr.get_last_build_info(req.profile)
-                if build_info:
-                    await fleet_mgr.update_device_version(req.device_id, build_info)
-                    yield f">>> Version recorded: {build_info.get('version', 'unknown')} ({build_info.get('commit', 'unknown')})\n"
+                if flash_succeeded:
+                    task_store.update_device_status(task_id, req.device_id, "ready")
+                    
+                    # Update version info in fleet after successful flash
+                    build_info = build_mgr.get_last_build_info(req.profile)
+                    if build_info:
+                        await fleet_mgr.update_device_version(req.device_id, build_info)
+                        yield f">>> Version recorded: {build_info.get('version', 'unknown')} ({build_info.get('commit', 'unknown')})\n"
+
+                    # Issue #17: Post-flash serial rescan — if the USB descriptor changed,
+                    # the /dev/serial/by-id/ path may be different. Detect and update fleet.json.
+                    if req.device_id.startswith("/dev/serial/by-id/"):
+                        yield ">>> Rescanning serial devices after flash...\n"
+                        await asyncio.sleep(3)  # Wait for USB re-enumeration
+                        async for log in _post_flash_rescan(req.device_id, initial_serials):
+                            yield log
+                else:
+                    task_store.update_device_status(task_id, req.device_id, "failed")
+                    yield "!!! Flash failed. Device status set to failed. Check the log above for details.\n"
             except Exception as e:
                 yield f"!!! Error during flash: {str(e)}\n"
                 task_store.update_device_status(task_id, req.device_id, "failed")
