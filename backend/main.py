@@ -840,6 +840,8 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                             and dev['method'] in ('can', 'serial', 'dfu')
                             and not (dev['method'] == 'serial' and not dev.get('is_katapult', True))
                         )
+                        # Preserve the fleet.json ID before reboot phase mutates dev['id']
+                        dev["fleet_id"] = dev["id"]
                         if needs_reboot:
                             reboot_tasks.append({
                                 "original_id": dev['id'], # Keep the original ID to find it in the devices list
