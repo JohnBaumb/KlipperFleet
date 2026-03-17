@@ -1154,6 +1154,14 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                                     commit = build_info.get("commit", "unknown")
                                     task_store.add_log(task_id, f">>> Version recorded: {ver} ({commit})\n")
 
+                                # Issue #17: Post-flash serial rescan for USB devices
+                                fleet_id = dev.get("fleet_id", dev["id"])
+                                if fleet_id.startswith("/dev/serial/by-id/"):
+                                    task_store.add_log(task_id, ">>> Rescanning serial devices after flash...\n")
+                                    await asyncio.sleep(3)
+                                    async for log in _post_flash_rescan(fleet_id, initial_serials):
+                                        task_store.add_log(task_id, log)
+
                             else:
                                 task_store.update_device_status(task_id, dev['id'], "failed")
                                 flash_results[dev['name']] = "FAILED"
