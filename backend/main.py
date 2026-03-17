@@ -840,6 +840,8 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                             and dev['method'] in ('can', 'serial', 'dfu')
                             and not (dev['method'] == 'serial' and not dev.get('is_katapult', True))
                         )
+                        # Preserve the fleet.json ID before reboot phase mutates dev['id']
+                        dev["fleet_id"] = dev["id"]
                         if needs_reboot:
                             reboot_tasks.append({
                                 "original_id": dev['id'], # Keep the original ID to find it in the devices list
@@ -1142,6 +1144,24 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                             if batch_flash_ok:
                                 task_store.update_device_status(task_id, dev['id'], "ready")
                                 flash_results[dev['name']] = "SUCCESS"
+
+                                # Update version info in fleet after successful flash
+                                build_info = build_mgr.get_last_build_info(dev["profile"])
+                                if build_info:
+                                    fleet_id = dev.get("fleet_id", dev["id"])
+                                    await fleet_mgr.update_device_version(fleet_id, build_info)
+                                    ver = build_info.get("version", "unknown")
+                                    commit = build_info.get("commit", "unknown")
+                                    task_store.add_log(task_id, f">>> Version recorded: {ver} ({commit})\n")
+
+                                # Issue #17: Post-flash serial rescan for USB devices
+                                fleet_id = dev.get("fleet_id", dev["id"])
+                                if fleet_id.startswith("/dev/serial/by-id/"):
+                                    task_store.add_log(task_id, ">>> Rescanning serial devices after flash...\n")
+                                    await asyncio.sleep(3)
+                                    async for log in flash_mgr.post_flash_rescan(fleet_id, initial_serials, fleet_mgr):
+                                        task_store.add_log(task_id, log)
+
                             else:
                                 task_store.update_device_status(task_id, dev['id'], "failed")
                                 flash_results[dev['name']] = "FAILED"
@@ -1393,55 +1413,6 @@ async def discover_devices() -> Dict[str, List[Dict[str, Any]]]:
             dev['managed'] = dev['id'] in managed_ids
 
     return {"serial": serial_devs, "can": can_devs, "dfu": dfu_devs, "linux": linux_devs}
-
-async def _post_flash_rescan(old_device_id: str, initial_serials: List[str]) -> AsyncGenerator[str, None]:
-    """Issue #17: After a successful flash, rescan serial devices and update fleet.json
-    if the USB descriptor (and thus the /dev/serial/by-id/ path) changed.
-    
-    Strategy:
-    1. Match by chip serial suffix (e.g. rp2040_E66160F42367B137) — unique and reliable.
-    2. Fallback: diff-based detection (one device disappeared, one new appeared).
-    3. If ambiguous, log a warning and let the user resolve manually.
-    """
-    current_serials_raw: List[Dict[str, str]] = await flash_mgr.discover_serial_devices(skip_moonraker=True)
-    current_ids: List[str] = [d['id'] for d in current_serials_raw]
-
-    # If the old path still exists, nothing changed
-    if old_device_id in current_ids:
-        return
-
-    # Strategy 1: Match by chip serial suffix
-    old_serial = flash_mgr._extract_serial_from_id(old_device_id)
-    if old_serial:
-        for cid in current_ids:
-            if old_serial in cid:
-                updated = await fleet_mgr.update_device_id(old_device_id, cid)
-                if updated:
-                    yield f">>> Device path changed: {old_device_id} -> {cid}\n"
-                    yield f">>> Fleet updated automatically (matched by serial: {old_serial}).\n"
-                else:
-                    yield f">>> WARNING: Device re-enumerated as {cid} but fleet entry not found for update.\n"
-                return
-
-    # Strategy 2: Diff-based — find which device disappeared and which appeared
-    disappeared = [s for s in initial_serials if s not in current_ids]
-    appeared = [s for s in current_ids if s not in initial_serials]
-
-    if old_device_id in disappeared and len(appeared) == 1:
-        new_id = appeared[0]
-        updated = await fleet_mgr.update_device_id(old_device_id, new_id)
-        if updated:
-            yield f">>> Device path changed: {old_device_id} -> {new_id}\n"
-            yield f">>> Fleet updated automatically (matched by diff: 1 disappeared, 1 appeared).\n"
-        else:
-            yield f">>> WARNING: Device re-enumerated as {new_id} but fleet entry not found for update.\n"
-        return
-
-    # Strategy 3: Ambiguous — warn the user
-    yield f">>> WARNING: Device {old_device_id} did not re-appear after flash.\n"
-    if appeared:
-        yield f">>> New devices detected: {', '.join(appeared)}\n"
-    yield ">>> Please verify fleet.json and update the device ID manually if needed.\n"
 
 @app.post("/flash")
 async def flash_device(req: FlashRequest) -> StreamingResponse:
@@ -1700,7 +1671,7 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                     if req.device_id.startswith("/dev/serial/by-id/"):
                         yield ">>> Rescanning serial devices after flash...\n"
                         await asyncio.sleep(3)  # Wait for USB re-enumeration
-                        async for log in _post_flash_rescan(req.device_id, initial_serials):
+                        async for log in flash_mgr.post_flash_rescan(req.device_id, initial_serials, fleet_mgr):
                             yield log
                 else:
                     task_store.update_device_status(task_id, req.device_id, "failed")

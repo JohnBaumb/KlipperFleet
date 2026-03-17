@@ -612,6 +612,60 @@ class FlashManager:
             
         return None
 
+    async def post_flash_rescan(
+        self,
+        old_device_id: str,
+        initial_serials: List[str],
+        fleet_mgr: Any,
+    ) -> AsyncGenerator[str, None]:
+        """Issue #17: After a successful flash, rescan serial devices and update
+        fleet.json if the USB descriptor (and thus /dev/serial/by-id/ path) changed.
+
+        Strategy:
+        1. Match by chip serial suffix (e.g. rp2040_E66160F42367B137) — unique and reliable.
+        2. Fallback: diff-based detection (one device disappeared, one new appeared).
+        3. If ambiguous, log a warning and let the user resolve manually.
+        """
+        current_serials_raw: List[Dict[str, str]] = await self.discover_serial_devices(skip_moonraker=True)
+        current_ids: List[str] = [d['id'] for d in current_serials_raw]
+
+        # If the old path still exists, nothing changed
+        if old_device_id in current_ids:
+            return
+
+        # Strategy 1: Match by chip serial suffix
+        old_serial = self._extract_serial_from_id(old_device_id)
+        if old_serial:
+            for cid in current_ids:
+                if old_serial in cid:
+                    updated = await fleet_mgr.update_device_id(old_device_id, cid)
+                    if updated:
+                        yield f">>> Device path changed: {old_device_id} -> {cid}\n"
+                        yield f">>> Fleet updated automatically (matched by serial: {old_serial}).\n"
+                    else:
+                        yield f">>> WARNING: Device re-enumerated as {cid} but fleet entry not found for update.\n"
+                    return
+
+        # Strategy 2: Diff-based — find which device disappeared and which appeared
+        disappeared = [s for s in initial_serials if s not in current_ids]
+        appeared = [s for s in current_ids if s not in initial_serials]
+
+        if old_device_id in disappeared and len(appeared) == 1:
+            new_id = appeared[0]
+            updated = await fleet_mgr.update_device_id(old_device_id, new_id)
+            if updated:
+                yield f">>> Device path changed: {old_device_id} -> {new_id}\n"
+                yield f">>> Fleet updated automatically (matched by diff: 1 disappeared, 1 appeared).\n"
+            else:
+                yield f">>> WARNING: Device re-enumerated as {new_id} but fleet entry not found for update.\n"
+            return
+
+        # Strategy 3: Ambiguous — warn the user
+        yield f">>> WARNING: Device {old_device_id} did not re-appear after flash.\n"
+        if appeared:
+            yield f">>> New devices detected: {', '.join(appeared)}\n"
+        yield ">>> Please verify fleet.json and update the device ID manually if needed.\n"
+
     async def resolve_dfu_id(self, device_id: str, known_dfu_id: Optional[str] = None, strict: bool = False) -> str:
         """Attempts to find a DFU device ID that matches a Serial ID (via serial number).
         If strict=True, does not fall back to single-device assumption."""
