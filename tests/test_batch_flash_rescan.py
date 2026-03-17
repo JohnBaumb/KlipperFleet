@@ -1,9 +1,5 @@
 """Tests for Issue #17 batch flash fixes: fleet_id preservation, version tracking,
-and post-flash serial rescan when USB descriptors change.
-
-The _post_flash_rescan logic is reimplemented here (mirroring backend/main.py) to
-avoid importing backend.main which triggers the FastAPI/uvicorn dependency chain.
-See test_backend_regression.py for the same pattern with _validate_profile_name."""
+and post-flash serial rescan when USB descriptors change."""
 import pytest
 import json
 import asyncio
@@ -12,66 +8,6 @@ from typing import List, Dict, Optional, AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock, patch
 from backend.fleet_manager import FleetManager
 from backend.flash_manager import FlashManager
-
-
-# ---------------------------------------------------------------------------
-# Local reimplementation of _post_flash_rescan from backend/main.py
-# Kept in sync manually — if the logic in main.py changes, update here too.
-# ---------------------------------------------------------------------------
-
-async def _post_flash_rescan(
-    old_device_id: str,
-    initial_serials: List[str],
-    fleet_mgr: FleetManager,
-    flash_mgr: FlashManager,
-) -> AsyncGenerator[str, None]:
-    """Reimplementation of backend.main._post_flash_rescan for testing.
-
-    Detects USB descriptor changes after flash and updates fleet.json.
-    Strategy:
-    1. Match by chip serial suffix (unique, reliable).
-    2. Diff-based: one disappeared, one appeared.
-    3. Ambiguous: warn and let user resolve.
-    """
-    current_serials_raw: List[Dict[str, str]] = await flash_mgr.discover_serial_devices(skip_moonraker=True)
-    current_ids: List[str] = [d['id'] for d in current_serials_raw]
-
-    # If the old path still exists, nothing changed
-    if old_device_id in current_ids:
-        return
-
-    # Strategy 1: Match by chip serial suffix
-    old_serial = flash_mgr._extract_serial_from_id(old_device_id)
-    if old_serial:
-        for cid in current_ids:
-            if old_serial in cid:
-                updated = await fleet_mgr.update_device_id(old_device_id, cid)
-                if updated:
-                    yield f">>> Device path changed: {old_device_id} -> {cid}\n"
-                    yield f">>> Fleet updated automatically (matched by serial: {old_serial}).\n"
-                else:
-                    yield f">>> WARNING: Device re-enumerated as {cid} but fleet entry not found for update.\n"
-                return
-
-    # Strategy 2: Diff-based
-    disappeared = [s for s in initial_serials if s not in current_ids]
-    appeared = [s for s in current_ids if s not in initial_serials]
-
-    if old_device_id in disappeared and len(appeared) == 1:
-        new_id = appeared[0]
-        updated = await fleet_mgr.update_device_id(old_device_id, new_id)
-        if updated:
-            yield f">>> Device path changed: {old_device_id} -> {new_id}\n"
-            yield f">>> Fleet updated automatically (matched by diff: 1 disappeared, 1 appeared).\n"
-        else:
-            yield f">>> WARNING: Device re-enumerated as {new_id} but fleet entry not found for update.\n"
-        return
-
-    # Strategy 3: Ambiguous
-    yield f">>> WARNING: Device {old_device_id} did not re-appear after flash.\n"
-    if appeared:
-        yield f">>> New devices detected: {', '.join(appeared)}\n"
-    yield ">>> Please verify fleet.json and update the device ID manually if needed.\n"
 
 
 # Helper to collect async generator output
@@ -191,14 +127,12 @@ class TestBatchVersionTracking:
 
 # ---------------------------------------------------------------------------
 # Fix 3: Post-flash serial rescan in batch flash path
+# Tests import FlashManager.post_flash_rescan directly — no reimplementation.
 # ---------------------------------------------------------------------------
 
 
 class TestPostFlashRescan:
-    """_post_flash_rescan detects USB descriptor changes and updates fleet.json.
-
-    Uses a local reimplementation of the rescan logic to avoid importing
-    backend.main (which triggers the FastAPI dependency chain)."""
+    """FlashManager.post_flash_rescan detects USB descriptor changes and updates fleet.json."""
 
     @pytest.fixture
     def fleet_mgr(self, tmp_path):
@@ -222,7 +156,7 @@ class TestPostFlashRescan:
         )
 
         logs = await _collect_logs(
-            _post_flash_rescan(old_id, [old_id], fleet_mgr, flash_mgr)
+            flash_mgr.post_flash_rescan(old_id, [old_id], fleet_mgr)
         )
 
         fleet = await fleet_mgr.get_fleet()
@@ -241,7 +175,7 @@ class TestPostFlashRescan:
         )
 
         logs = await _collect_logs(
-            _post_flash_rescan(device_id, [device_id], fleet_mgr, flash_mgr)
+            flash_mgr.post_flash_rescan(device_id, [device_id], fleet_mgr)
         )
 
         fleet = await fleet_mgr.get_fleet()
@@ -264,7 +198,7 @@ class TestPostFlashRescan:
         flash_mgr._extract_serial_from_id = MagicMock(return_value="NOMATCH")
 
         logs = await _collect_logs(
-            _post_flash_rescan(old_id, [old_id], fleet_mgr, flash_mgr)
+            flash_mgr.post_flash_rescan(old_id, [old_id], fleet_mgr)
         )
 
         fleet = await fleet_mgr.get_fleet()
@@ -288,7 +222,7 @@ class TestPostFlashRescan:
         flash_mgr._extract_serial_from_id = MagicMock(return_value="NOMATCH")
 
         logs = await _collect_logs(
-            _post_flash_rescan(old_id, [old_id], fleet_mgr, flash_mgr)
+            flash_mgr.post_flash_rescan(old_id, [old_id], fleet_mgr)
         )
 
         # Fleet should NOT be modified — ambiguous
@@ -307,7 +241,7 @@ class TestPostFlashRescan:
         flash_mgr._extract_serial_from_id = MagicMock(return_value="NOMATCH")
 
         logs = await _collect_logs(
-            _post_flash_rescan(old_id, [old_id], fleet_mgr, flash_mgr)
+            flash_mgr.post_flash_rescan(old_id, [old_id], fleet_mgr)
         )
 
         fleet = await fleet_mgr.get_fleet()
@@ -332,7 +266,7 @@ class TestPostFlashRescan:
         )
 
         logs = await _collect_logs(
-            _post_flash_rescan(old_id, [old_id], fleet_mgr, flash_mgr)
+            flash_mgr.post_flash_rescan(old_id, [old_id], fleet_mgr)
         )
 
         fleet = await fleet_mgr.get_fleet()
@@ -354,7 +288,7 @@ class TestPostFlashRescan:
         ])
 
         logs = await _collect_logs(
-            _post_flash_rescan(old_id, [old_id], fleet_mgr, flash_mgr)
+            flash_mgr.post_flash_rescan(old_id, [old_id], fleet_mgr)
         )
 
         fleet = await fleet_mgr.get_fleet()
@@ -378,23 +312,82 @@ class TestPostFlashRescan:
 
         initial_serials = [old_id, other_id]
         logs = await _collect_logs(
-            _post_flash_rescan(old_id, initial_serials, fleet_mgr, flash_mgr)
+            flash_mgr.post_flash_rescan(old_id, initial_serials, fleet_mgr)
         )
 
         fleet = await fleet_mgr.get_fleet()
         assert fleet[0]["id"] == blank_serial_id
         assert any("matched by diff" in l for l in logs)
 
-    # --- Edge case: _extract_serial_from_id with blank serial paths ---
+    # --- Edge case: Strategy 1 false positive with blank serial ---
+
+    @pytest.mark.asyncio
+    async def test_blank_serial_strategy1_false_positive_same_chip(self, fleet_mgr, flash_mgr):
+        """Blank serial + same chip type on another board — Strategy 1 may
+        match the wrong device.  Documents known limitation."""
+        old_id = "/dev/serial/by-id/usb-Kalico_stm32f103xe_30FFDA05344E-if00"
+        other_board = "/dev/serial/by-id/usb-Kalico_stm32f103xe_DEADBEEF1234-if00"
+        blank_reappear = "/dev/serial/by-id/usb-Kalico_stm32f103xe-if00"
+        await fleet_mgr.save_device({"id": old_id, "name": "MCU"})
+
+        flash_mgr.discover_serial_devices = AsyncMock(return_value=[
+            {"id": other_board},
+            {"id": blank_reappear},
+        ])
+
+        logs = await _collect_logs(
+            flash_mgr.post_flash_rescan(old_id, [old_id, other_board], fleet_mgr)
+        )
+
+        fleet = await fleet_mgr.get_fleet()
+        # Known limitation: chip type substring matches the wrong device
+        assert any("Fleet updated" in l or "WARNING" in l for l in logs)
+
+    @pytest.mark.asyncio
+    async def test_blank_serial_no_serial_at_all(self, fleet_mgr, flash_mgr):
+        """Device reappears with completely stripped path — only vendor, no chip type."""
+        old_id = "/dev/serial/by-id/usb-Kalico_stm32f103xe_30FFDA05344E-if00"
+        bare_id = "/dev/serial/by-id/usb-Kalico-if00"
+        await fleet_mgr.save_device({"id": old_id, "name": "MCU"})
+
+        flash_mgr.discover_serial_devices = AsyncMock(
+            return_value=[{"id": bare_id}]
+        )
+
+        logs = await _collect_logs(
+            flash_mgr.post_flash_rescan(old_id, [old_id], fleet_mgr)
+        )
+
+        fleet = await fleet_mgr.get_fleet()
+        assert fleet[0]["id"] == bare_id
+        assert any("Fleet updated" in l for l in logs)
+
+    # --- Edge case: rescan when fleet entry was already removed ---
+
+    @pytest.mark.asyncio
+    async def test_rescan_fleet_entry_missing(self, fleet_mgr, flash_mgr):
+        """Fleet entry removed before rescan — should warn, not crash."""
+        old_id = "/dev/serial/by-id/usb-Kalico_stm32f103xe_AABB-if00"
+        new_id = "/dev/serial/by-id/usb-Kalico17_stm32f103xe_AABB-if00"
+
+        flash_mgr.discover_serial_devices = AsyncMock(
+            return_value=[{"id": new_id}]
+        )
+
+        logs = await _collect_logs(
+            flash_mgr.post_flash_rescan(old_id, [old_id], fleet_mgr)
+        )
+
+        assert any("WARNING" in l and "not found" in l for l in logs)
+
+    # --- Edge case: _extract_serial_from_id ---
 
     def test_extract_serial_blank_serial_path(self):
         """A device with no chip serial in the path should still return something."""
         mgr = FlashManager("/tmp/klipper", "/tmp/katapult")
-        # Path with no unique serial — just vendor + chip type
         result = mgr._extract_serial_from_id(
             "/dev/serial/by-id/usb-Kalico_stm32f103xe-if00"
         )
-        # Should return the longest candidate (stm32f103xe or usb-Kalico)
         assert result is not None
 
     def test_extract_serial_normal_path(self):
@@ -418,17 +411,11 @@ class TestPostFlashRescan:
         assert not "linux_process".startswith("/dev/serial/by-id/")
         assert not "aabbccddeeff".startswith("/dev/serial/by-id/")
 
-    # --- Edge case: extract_serial filters common prefixes ---
-
     def test_extract_serial_filters_katapult_prefix(self):
         """Katapult paths — known limitation: _extract_serial_from_id splits on '_'
         which produces 'usb-katapult' as a single token. The filter list has
         'katapult' but not 'usb-katapult', so the token survives.
-        When 'usb-katapult' and the chip serial have equal length, the sort is
-        stable and 'usb-katapult' may be returned instead of the chip serial.
-
-        This test documents the ACTUAL behavior. With long serials (>12 chars),
-        the serial wins by length. With short serials, it's a known limitation."""
+        With long serials (>12 chars), the serial wins by length."""
         mgr = FlashManager("/tmp/klipper", "/tmp/katapult")
         # Long serial — chip serial wins by length
         result_long = mgr._extract_serial_from_id(
@@ -440,10 +427,7 @@ class TestPostFlashRescan:
         result_short = mgr._extract_serial_from_id(
             "/dev/serial/by-id/usb-katapult_stm32f103xe_30FFDA05344E-if00"
         )
-        # 'usb-katapult' is 12 chars, '30FFDA05344E' is 12 chars
-        # sorted() is stable, 'usb-katapult' comes first in the parts list
-        # so it gets returned. This is a known limitation.
-        assert result_short is not None  # Returns something, just maybe not the serial
+        assert result_short is not None
 
     def test_extract_serial_filters_klipper_prefix(self):
         """Legacy Klipper paths should still extract the chip serial."""
@@ -462,68 +446,7 @@ class TestPostFlashRescan:
         )
         assert result == "30FFDA05344E"
 
-    # --- Edge case: Strategy 1 false positive with blank serial ---
-
-    @pytest.mark.asyncio
-    async def test_blank_serial_strategy1_false_positive_same_chip(self, fleet_mgr, flash_mgr):
-        """Blank serial + same chip type on another board — Strategy 1 may
-        match the wrong device.  Documents known limitation."""
-        old_id = "/dev/serial/by-id/usb-Kalico_stm32f103xe_30FFDA05344E-if00"
-        other_board = "/dev/serial/by-id/usb-Kalico_stm32f103xe_DEADBEEF1234-if00"
-        blank_reappear = "/dev/serial/by-id/usb-Kalico_stm32f103xe-if00"
-        await fleet_mgr.save_device({"id": old_id, "name": "MCU"})
-
-        flash_mgr.discover_serial_devices = AsyncMock(return_value=[
-            {"id": other_board},
-            {"id": blank_reappear},
-        ])
-
-        logs = await _collect_logs(
-            _post_flash_rescan(old_id, [old_id, other_board], fleet_mgr, flash_mgr)
-        )
-
-        fleet = await fleet_mgr.get_fleet()
-        # Known limitation: chip type substring matches the wrong device
-        assert any("Fleet updated" in l or "WARNING" in l for l in logs)
-
-    @pytest.mark.asyncio
-    async def test_blank_serial_no_serial_at_all(self, fleet_mgr, flash_mgr):
-        """Device reappears with completely stripped path — only vendor, no chip type."""
-        old_id = "/dev/serial/by-id/usb-Kalico_stm32f103xe_30FFDA05344E-if00"
-        bare_id = "/dev/serial/by-id/usb-Kalico-if00"
-        await fleet_mgr.save_device({"id": old_id, "name": "MCU"})
-
-        flash_mgr.discover_serial_devices = AsyncMock(
-            return_value=[{"id": bare_id}]
-        )
-
-        logs = await _collect_logs(
-            _post_flash_rescan(old_id, [old_id], fleet_mgr, flash_mgr)
-        )
-
-        fleet = await fleet_mgr.get_fleet()
-        assert fleet[0]["id"] == bare_id
-        assert any("Fleet updated" in l for l in logs)
-
-    # --- Edge case: rescan when fleet entry was already removed ---
-
-    @pytest.mark.asyncio
-    async def test_rescan_fleet_entry_missing(self, fleet_mgr, flash_mgr):
-        """Fleet entry removed before rescan — should warn, not crash."""
-        old_id = "/dev/serial/by-id/usb-Kalico_stm32f103xe_AABB-if00"
-        new_id = "/dev/serial/by-id/usb-Kalico17_stm32f103xe_AABB-if00"
-
-        flash_mgr.discover_serial_devices = AsyncMock(
-            return_value=[{"id": new_id}]
-        )
-
-        logs = await _collect_logs(
-            _post_flash_rescan(old_id, [old_id], fleet_mgr, flash_mgr)
-        )
-
-        assert any("WARNING" in l and "not found" in l for l in logs)
-
-    # --- Edge case: non-serial fleet_id skips rescan gate ---
+    # --- Rescan gate checks ---
 
     def test_rescan_gate_can_device(self):
         """CAN bus devices (hex UUID) should not trigger serial rescan."""
@@ -599,7 +522,7 @@ class TestBatchFlashEndToEnd:
         )
 
         logs = await _collect_logs(
-            _post_flash_rescan(fleet_id, [original_id], fleet_mgr, flash_mgr)
+            flash_mgr.post_flash_rescan(fleet_id, [original_id], fleet_mgr)
         )
 
         fleet = await fleet_mgr.get_fleet()
@@ -632,7 +555,7 @@ class TestBatchFlashEndToEnd:
         )
 
         logs = await _collect_logs(
-            _post_flash_rescan(fleet_id, [original_id], fleet_mgr, flash_mgr)
+            flash_mgr.post_flash_rescan(fleet_id, [original_id], fleet_mgr)
         )
 
         fleet = await fleet_mgr.get_fleet()
@@ -663,7 +586,7 @@ class TestBatchFlashEndToEnd:
         )
 
         logs = await _collect_logs(
-            _post_flash_rescan(fleet_id, [device_id], fleet_mgr, flash_mgr)
+            flash_mgr.post_flash_rescan(fleet_id, [device_id], fleet_mgr)
         )
 
         fleet = await fleet_mgr.get_fleet()
@@ -728,7 +651,7 @@ class TestBatchFlashEndToEnd:
         ])
 
         logs = await _collect_logs(
-            _post_flash_rescan(dev_a, [dev_a, dev_b], fleet_mgr, flash_mgr)
+            flash_mgr.post_flash_rescan(dev_a, [dev_a, dev_b], fleet_mgr)
         )
 
         fleet = await fleet_mgr.get_fleet()
