@@ -1144,6 +1144,16 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                             if batch_flash_ok:
                                 task_store.update_device_status(task_id, dev['id'], "ready")
                                 flash_results[dev['name']] = "SUCCESS"
+
+                                # Update version info in fleet after successful flash
+                                build_info = build_mgr.get_last_build_info(dev["profile"])
+                                if build_info:
+                                    fleet_id = dev.get("fleet_id", dev["id"])
+                                    await fleet_mgr.update_device_version(fleet_id, build_info)
+                                    ver = build_info.get("version", "unknown")
+                                    commit = build_info.get("commit", "unknown")
+                                    task_store.add_log(task_id, f">>> Version recorded: {ver} ({commit})\n")
+
                             else:
                                 task_store.update_device_status(task_id, dev['id'], "failed")
                                 flash_results[dev['name']] = "FAILED"
