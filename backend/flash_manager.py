@@ -702,8 +702,32 @@ class FlashManager:
                         path: Optional[str] = info.get("path")
                         if path:
                             return path
+                        # Moonraker API may omit 'path'; fall back to moonraker.conf
+                        path = self._read_beacon_path_from_moonraker_conf(key)
+                        if path:
+                            return path
         except Exception as e:
             logger.warning("Failed to query Moonraker update_manager for beacon_klipper: %s", e)
+        return None
+
+    def _read_beacon_path_from_moonraker_conf(self, section_name: str) -> Optional[str]:
+        """Reads the beacon repo path from moonraker.conf [update_manager <section>] as fallback."""
+        conf_path: str = os.path.expanduser("~/printer_data/config/moonraker.conf")
+        try:
+            with open(conf_path, "r") as f:
+                lines = f.readlines()
+            in_section = False
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    header = stripped[1:-1].strip()
+                    in_section = header.lower() == f"update_manager {section_name}".lower()
+                    continue
+                if in_section and stripped.startswith("path:"):
+                    raw_path = stripped.split(":", 1)[1].strip()
+                    return os.path.expanduser(raw_path)
+        except Exception as e:
+            logger.warning("Failed to read beacon path from moonraker.conf: %s", e)
         return None
 
     async def discover_beacon_devices(self) -> List[Dict[str, str]]:
