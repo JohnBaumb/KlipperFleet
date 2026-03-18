@@ -84,7 +84,7 @@
                         <i class="fas fa-bars text-lg"></i>
                     </button>
                     <a :href="mainsailUrl" class="hidden md:flex text-gray-400 hover:text-white items-center text-sm transition-colors mr-4 border-r border-gray-800 pr-4">
-                        <i class="fas fa-arrow-left mr-2"></i> Return to Mainsail
+                        <i class="fas fa-arrow-left mr-2"></i> Return to Printer UI
                     </a>
                     <h2 class="text-lg md:text-xl font-semibold capitalize">{{ view }}</h2>
                     <span v-if="building || flashing" class="flex items-center text-orange-400 text-xs md:text-sm ml-auto md:ml-0">
@@ -808,7 +808,7 @@
                 const expandLogs = ref(localStorage.getItem('kf_expand_logs') === 'true');
                 const expandLogsHeight = ref(localStorage.getItem('kf_expand_logs_height') || '800px');
                 const error = ref(null);
-                const mainsailUrl = window.location.protocol + '//' + window.location.hostname;
+                const mainsailUrl = window.location.protocol + '//' + window.location.hostname + (window.location.port ? ':' + window.location.port : '');
                 const showRawSymbolNames = ref(localStorage.getItem('kf_show_raw_symbols') === 'true');
                 const showOptionalFeatures = ref(localStorage.getItem('kf_show_optional') === 'true');
                 const isKlipperKconfiglib = ref(true);
