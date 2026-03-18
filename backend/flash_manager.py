@@ -681,53 +681,26 @@ class FlashManager:
         return device_id
 
     async def get_beacon_klipper_path(self) -> Optional[str]:
-        """Discovers beacon_klipper repo path via Moonraker's update_manager API."""
+        """Discovers beacon_klipper repo path via Moonraker's /server/config API."""
         try:
             async with httpx.AsyncClient() as client:
                 response: httpx.Response = await client.get(
-                    "http://127.0.0.1:7125/machine/update/status", timeout=5.0
+                    "http://127.0.0.1:7125/server/config", timeout=5.0
                 )
                 if response.status_code != 200:
                     return None
                 data = response.json()
-                version_info: Dict[str, Any] = data.get("result", {}).get("version_info", {})
-                for key, info in version_info.items():
-                    if not isinstance(info, dict):
+                config: Dict[str, Any] = data.get("result", {}).get("config", {})
+                for key, section in config.items():
+                    if not key.startswith("update_manager "):
                         continue
-                    if info.get("configured_type") != "git_repo":
+                    if "beacon" not in key.lower():
                         continue
-                    # Flexible matching: check key name, remote_url, or repo origin for "beacon"
-                    origin: str = info.get("remote_url", "") or info.get("origin", "") or ""
-                    if "beacon" in key.lower() or "beacon" in origin.lower():
-                        path: Optional[str] = info.get("path")
-                        if path:
-                            return path
-                        # Moonraker API may omit 'path'; fall back to moonraker.conf
-                        path = self._read_beacon_path_from_moonraker_conf(key)
-                        if path:
-                            return path
+                    raw_path: Optional[str] = section.get("path")
+                    if raw_path:
+                        return os.path.expanduser(raw_path)
         except Exception as e:
-            logger.warning("Failed to query Moonraker update_manager for beacon_klipper: %s", e)
-        return None
-
-    def _read_beacon_path_from_moonraker_conf(self, section_name: str) -> Optional[str]:
-        """Reads the beacon repo path from moonraker.conf [update_manager <section>] as fallback."""
-        conf_path: str = os.path.expanduser("~/printer_data/config/moonraker.conf")
-        try:
-            with open(conf_path, "r") as f:
-                lines = f.readlines()
-            in_section = False
-            for line in lines:
-                stripped = line.strip()
-                if stripped.startswith("[") and stripped.endswith("]"):
-                    header = stripped[1:-1].strip()
-                    in_section = header.lower() == f"update_manager {section_name}".lower()
-                    continue
-                if in_section and stripped.startswith("path:"):
-                    raw_path = stripped.split(":", 1)[1].strip()
-                    return os.path.expanduser(raw_path)
-        except Exception as e:
-            logger.warning("Failed to read beacon path from moonraker.conf: %s", e)
+            logger.warning("Failed to query Moonraker for beacon_klipper path: %s", e)
         return None
 
     async def discover_beacon_devices(self) -> List[Dict[str, str]]:

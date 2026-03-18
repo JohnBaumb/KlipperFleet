@@ -63,7 +63,7 @@ class TestDiscoverBeaconDevices:
 
 
 class TestGetBeaconKlipperPath:
-    """Tests for Moonraker update_manager integration to find beacon_klipper repo."""
+    """Tests for Moonraker /server/config integration to find beacon_klipper repo."""
 
     @patch("backend.flash_manager.httpx.AsyncClient")
     def test_finds_beacon_klipper_path(self, mock_client_cls, flash_mgr):
@@ -71,13 +71,10 @@ class TestGetBeaconKlipperPath:
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "result": {
-                "version_info": {
-                    "system": {"package_count": 0},
-                    "klipper": {"configured_type": "git_repo", "path": "/home/pi/klipper"},
-                    "beacon": {
-                        "configured_type": "git_repo",
+                "config": {
+                    "update_manager beacon": {
                         "path": "/home/pi/beacon_klipper",
-                        "remote_url": "https://github.com/beacon3d/beacon_klipper.git",
+                        "type": "git_repo",
                     },
                 }
             }
@@ -94,13 +91,41 @@ class TestGetBeaconKlipperPath:
         assert result == "/home/pi/beacon_klipper"
 
     @patch("backend.flash_manager.httpx.AsyncClient")
+    def test_expands_home_dir(self, mock_client_cls, flash_mgr):
+        """Should expand ~ in the path."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "result": {
+                "config": {
+                    "update_manager beacon": {
+                        "path": "~/beacon_klipper",
+                        "type": "git_repo",
+                    },
+                }
+            }
+        }
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        result = asyncio.get_event_loop().run_until_complete(
+            flash_mgr.get_beacon_klipper_path()
+        )
+        assert result is not None
+        assert result.endswith("/beacon_klipper")
+        assert "~" not in result
+
+    @patch("backend.flash_manager.httpx.AsyncClient")
     def test_returns_none_when_not_found(self, mock_client_cls, flash_mgr):
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "result": {
-                "version_info": {
-                    "klipper": {"configured_type": "git_repo", "path": "/home/pi/klipper"},
+                "config": {
+                    "update_manager klipper": {"path": "/home/pi/klipper"},
                 }
             }
         }
@@ -129,33 +154,6 @@ class TestGetBeaconKlipperPath:
             flash_mgr.get_beacon_klipper_path()
         )
         assert result is None
-
-    @patch("backend.flash_manager.httpx.AsyncClient")
-    def test_matches_by_remote_url(self, mock_client_cls, flash_mgr):
-        """Should match even if the key name doesn't contain 'beacon'."""
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "result": {
-                "version_info": {
-                    "my_probe": {
-                        "configured_type": "git_repo",
-                        "path": "/home/pi/beacon_klipper",
-                        "remote_url": "https://github.com/beacon3d/beacon_klipper.git",
-                    },
-                }
-            }
-        }
-        mock_client = AsyncMock()
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client_cls.return_value = mock_client
-
-        result = asyncio.get_event_loop().run_until_complete(
-            flash_mgr.get_beacon_klipper_path()
-        )
-        assert result == "/home/pi/beacon_klipper"
 
 
 # ---------------------------------------------------------------------------
