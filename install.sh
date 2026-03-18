@@ -162,7 +162,26 @@ if [ -f "$NAVI_JSON" ]; then
     fi
 fi
 
-# 9. Systemd Service
+# 9. Fluidd Navigation Integration (requires fluidd-core/fluidd#1786)
+log_info "Integrating with Fluidd navigation..."
+python3 "${SRCDIR}/install_scripts/setup_fluidd_navi.py" || true
+
+# Deploy redirect shim to Fluidd web root and register as persistent_files
+# so Moonraker preserves it across Fluidd updates.
+FLUIDD_ROOT="/home/${USER}/fluidd"
+if [ -d "$FLUIDD_ROOT" ]; then
+    cp "${SRCDIR}/install_scripts/klipperfleet.html" "$FLUIDD_ROOT/klipperfleet.html"
+    chown "$USER:$USER_GROUP" "$FLUIDD_ROOT/klipperfleet.html"
+    chmod 644 "$FLUIDD_ROOT/klipperfleet.html"
+    log_info "Adding klipperfleet.html to Fluidd persistent_files..."
+    python3 "${SRCDIR}/install_scripts/setup_moonraker.py" \
+        --add-persistent-file fluidd klipperfleet.html \
+        "${USER_HOME}/printer_data/config/moonraker.conf"
+else
+    log_warn "Fluidd web root not found at $FLUIDD_ROOT; redirect shim not deployed."
+fi
+
+# 10. Systemd Service
 log_info "Creating systemd service..."
 SERVICE_FILE="/etc/systemd/system/klipperfleet.service"
 cat > "$SERVICE_FILE" << EOF
