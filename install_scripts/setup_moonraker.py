@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Add/update the KlipperFleet update_manager section in moonraker.conf.
 
-Usage: python3 setup_moonraker.py <moonraker.conf path> <KlipperFleet repo path>
+Usage:
+  python3 setup_moonraker.py <moonraker.conf path> <KlipperFleet repo path>
+  python3 setup_moonraker.py --add-persistent-file <section> <filename> <moonraker.conf path>
+  python3 setup_moonraker.py --remove-persistent-file <section> <filename> <moonraker.conf path>
 
 Idempotent: creates the section if missing, migrates deprecated options if
 the section already exists (e.g. install_script -> system_dependencies).
@@ -19,9 +22,13 @@ requirements: backend/requirements.txt
 system_dependencies: install_scripts/system-dependencies.json"""
 
 
-def _extract_klipperfleet_section(content: str):
-    """Return (start, end) char offsets of the [update_manager klipperfleet] section."""
-    m = re.search(r"^\[update_manager klipperfleet\]", content, re.MULTILINE)
+def _extract_section(content: str, section_name: str):
+    """Return (start, end) char offsets of a named section.
+
+    Works for any [update_manager <name>] section header.
+    """
+    pattern = rf"^\[update_manager {re.escape(section_name)}\]"
+    m = re.search(pattern, content, re.MULTILINE)
     if not m:
         return None, None
     start = m.start()
@@ -29,6 +36,11 @@ def _extract_klipperfleet_section(content: str):
     next_section = re.search(r"^\[", content[m.end():], re.MULTILINE)
     end = m.end() + next_section.start() if next_section else len(content)
     return start, end
+
+
+def _extract_klipperfleet_section(content: str):
+    """Return (start, end) char offsets of the [update_manager klipperfleet] section."""
+    return _extract_section(content, "klipperfleet")
 
 
 def migrate_moonraker_conf(conf_path: str, kf_path: str) -> bool:
@@ -76,7 +88,97 @@ def migrate_moonraker_conf(conf_path: str, kf_path: str) -> bool:
     return False
 
 
+def add_persistent_file(conf_path: str, section_name: str, filename: str) -> bool:
+    """Add a filename to persistent_files in an [update_manager <section>] block.
+
+    Idempotent: does nothing if already present.
+    Creates the persistent_files option if it doesn't exist.
+    """
+    if not os.path.isfile(conf_path):
+        print(f"KlipperFleet: WARNING: {conf_path} not found.", file=sys.stderr)
+        return False
+
+    with open(conf_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    start, end = _extract_section(content, section_name)
+    if start is None:
+        print(f"KlipperFleet: WARNING: [update_manager {section_name}] not found in {conf_path}.",
+              file=sys.stderr)
+        return False
+
+    section = content[start:end]
+
+    # Check if filename is already listed
+    if re.search(rf"^\s+{re.escape(filename)}\s*$", section, re.MULTILINE):
+        print(f"KlipperFleet: {filename} already in {section_name} persistent_files.")
+        return False
+
+    if "persistent_files:" in section:
+        # Append to existing persistent_files list
+        section = re.sub(
+            r"(persistent_files:\s*\n(?:\s+\S+\n)*)",
+            rf"\g<1>    {filename}\n",
+            section
+        )
+    else:
+        # Add persistent_files before the next option or at end of section
+        section = section.rstrip() + f"\npersistent_files:\n    {filename}\n"
+
+    content = content[:start] + section + content[end:]
+    with open(conf_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    print(f"KlipperFleet: Added {filename} to {section_name} persistent_files.")
+    return True
+
+
+def remove_persistent_file(conf_path: str, section_name: str, filename: str) -> bool:
+    """Remove a filename from persistent_files in an [update_manager <section>] block."""
+    if not os.path.isfile(conf_path):
+        return False
+
+    with open(conf_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    start, end = _extract_section(content, section_name)
+    if start is None:
+        return False
+
+    section = content[start:end]
+
+    # Remove the specific file entry
+    new_section = re.sub(rf"\n\s+{re.escape(filename)}\s*(?=\n)", "", section)
+    if new_section == section:
+        return False  # Not found
+
+    # If persistent_files is now empty, remove the key entirely
+    new_section = re.sub(r"\npersistent_files:\s*\n(?=\S|\Z)", "\n", new_section)
+
+    content = content[:start] + new_section + content[end:]
+    with open(conf_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    print(f"KlipperFleet: Removed {filename} from {section_name} persistent_files.")
+    return True
+
+
 def main():
+    # Handle --add-persistent-file / --remove-persistent-file mode
+    if len(sys.argv) >= 2 and sys.argv[1] in ("--add-persistent-file", "--remove-persistent-file"):
+        if len(sys.argv) < 5:
+            print(f"Usage: setup_moonraker.py {sys.argv[1]} <section> <filename> <moonraker.conf>",
+                  file=sys.stderr)
+            sys.exit(1)
+        section_name = sys.argv[2]
+        filename = sys.argv[3]
+        conf_path = sys.argv[4]
+        if sys.argv[1] == "--add-persistent-file":
+            add_persistent_file(conf_path, section_name, filename)
+        else:
+            remove_persistent_file(conf_path, section_name, filename)
+        sys.exit(0)
+
     if len(sys.argv) < 3:
         print("Usage: setup_moonraker.py <moonraker_conf_path> <kf_repo_path>", file=sys.stderr)
         sys.exit(1)

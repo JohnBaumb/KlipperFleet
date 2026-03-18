@@ -1,7 +1,7 @@
 # KlipperFleet
 
 > [!WARNING]
-> **ALPHA SOFTWARE** - Tested on specific CAN bus, STM32 Serial/DFU, and Linux Process devices (see below). Non-Raspberry Pi and Fluidd are unsupported but on the roadmap. Kalico is auto-detected if installed at `~/klipper`.
+> **ALPHA SOFTWARE** - Tested on specific CAN bus, STM32 Serial/DFU, and Linux Process devices (see below). Non-Raspberry Pi and Fluidd support requires [fluidd-core/fluidd#1786](https://github.com/fluidd-core/fluidd/pull/1786). Kalico is auto-detected if installed at `~/klipper`.
 >
 > Contributions and [bug reports](https://github.com/JohnBaumb/KlipperFleet/issues) are appreciated!
 
@@ -17,7 +17,7 @@ KlipperFleet is a web interface (integrated into Mainsail) for configuring, buil
 - **Auto Reboot**: Detects Klipper vs. Katapult/DFU mode and reboots devices into the correct bootloader automatically.
 - **Service Management**: Stops/starts Klipper and Moonraker services during flash operations.
 - **Integrated Flashing**: Flash via Serial, CAN, or DFU from the browser with real-time log streaming.
-- **Mainsail Integration**: Native look and feel within the Mainsail ecosystem.
+- **Mainsail Integration**: Native look and feel within the Mainsail and Fluidd ecosystem.
 
 ## Tested Hardware
 
@@ -108,6 +108,19 @@ The installer auto-configures `.theme/navi.json`. If the entry is missing, add i
     "position": 86
   }
 ]
+```
+
+### Fluidd Sidebar Link
+The installer adds a KlipperFleet link to Fluidd's sidebar navigation via Moonraker's database API. This requires [fluidd-core/fluidd#1786](https://github.com/fluidd-core/fluidd/pull/1786) (custom navigation links).
+
+If the link is missing, run the setup script manually:
+```bash
+python3 ~/KlipperFleet/install_scripts/setup_fluidd_navi.py
+```
+
+To remove:
+```bash
+python3 ~/KlipperFleet/install_scripts/setup_fluidd_navi.py --remove
 ```
 
 ## Usage
