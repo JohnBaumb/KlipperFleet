@@ -12,6 +12,7 @@ import subprocess
 import sys
 import re
 import uuid
+import httpx
 from asyncio.subprocess import Process
 
 logger = logging.getLogger("klipperfleet")
@@ -308,8 +309,8 @@ class Device(BaseModel):
     name: str
     id: str
     old_id: Optional[str] = None
-    profile: str
-    method: str
+    profile: Optional[str] = None  # None for beacon devices (no build profile)
+    method: str  # "serial", "can", "dfu", "linux", "beacon"
     interface: Optional[str] = "can0"
     baudrate: Optional[int] = 250000  # Serial baudrate for Katapult flashtool.py (common: 115200, 250000, 500000)
     notes: Optional[str] = ""
@@ -324,9 +325,9 @@ class Device(BaseModel):
     exclude_from_batch: bool = False
 
 class FlashRequest(BaseModel):
-    profile: str
+    profile: Optional[str] = None  # None for beacon devices (no build artifact)
     device_id: str
-    method: str # "serial", "can", "dfu", "linux"
+    method: str  # "serial", "can", "dfu", "linux", "beacon"
     dfu_id: Optional[str] = None
     baudrate: Optional[int] = 250000  # Serial baudrate for Katapult
     use_magic_baud: Optional[bool] = False
@@ -1309,7 +1310,11 @@ async def get_fleet(fast: bool = False) -> List[Dict[str, Any]]:
 @app.post("/fleet/device")
 async def save_device(device: Device) -> Dict[str, str]:
     """Registers or updates a device in the fleet."""
-    await fleet_mgr.save_device(device.dict())
+    data = device.dict()
+    # Beacon devices are always excluded from batch operations
+    if data.get("method") == "beacon":
+        data["exclude_from_batch"] = True
+    await fleet_mgr.save_device(data)
     return {"message": "Device saved to fleet"}
 
 @app.post("/fleet/attach")
@@ -1365,19 +1370,34 @@ async def get_fleet_versions() -> Dict[str, Any]:
                 if mcu_constants.get("MCU") == "linux" or "rpi" in mcu_id.lower() or "host" in mcu_id.lower():
                     dev_info["live_version"] = mcu_info.get("version")
                     break
-        
+
+        # Beacon version: parse from Moonraker update_manager status
+        if dev.get('method') == 'beacon' and dev_info["live_version"] is None:
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get("http://127.0.0.1:7125/machine/update/status", timeout=5.0)
+                    if resp.status_code == 200:
+                        vi = resp.json().get("result", {}).get("version_info", {})
+                        for key, info in vi.items():
+                            if isinstance(info, dict) and "beacon" in key.lower():
+                                dev_info["live_version"] = info.get("version")
+                                break
+            except Exception:
+                pass
+
         version_info[device_id] = dev_info
-    
+
     return version_info
 
 @app.get("/devices/discover")
 async def discover_devices() -> Dict[str, List[Dict[str, Any]]]:
-    """Discovers Serial, CAN, DFU, and Linux process devices."""
+    """Discovers Serial, CAN, DFU, Linux process, and Beacon devices."""
     serial_devs: List[Dict[str, Any]] = await flash_mgr.discover_serial_devices()
     can_devs: List[Dict[str, Any]] = await flash_mgr.discover_can_devices(force=True)
     dfu_devs: List[Dict[str, Any]] = await flash_mgr.discover_dfu_devices()
     linux_devs: List[Dict[str, Any]] = flash_mgr.discover_linux_process()
-    
+    beacon_devs: List[Dict[str, Any]] = await flash_mgr.discover_beacon_devices()
+
     # Mark managed devices
     fleet = await fleet_mgr.get_fleet()
     managed_ids = set()
@@ -1387,12 +1407,12 @@ async def discover_devices() -> Dict[str, List[Dict[str, Any]]]:
             managed_ids.add(d['serial_id'])
         if d.get('dfu_id'):
             managed_ids.add(d['dfu_id'])
-            
-    for category in [serial_devs, can_devs, dfu_devs, linux_devs]:
+
+    for category in [serial_devs, can_devs, dfu_devs, linux_devs, beacon_devs]:
         for dev in category:
             dev['managed'] = dev['id'] in managed_ids
 
-    return {"serial": serial_devs, "can": can_devs, "dfu": dfu_devs, "linux": linux_devs}
+    return {"serial": serial_devs, "can": can_devs, "dfu": dfu_devs, "linux": linux_devs, "beacon": beacon_devs}
 
 async def _post_flash_rescan(old_device_id: str, initial_serials: List[str]) -> AsyncGenerator[str, None]:
     """Issue #17: After a successful flash, rescan serial devices and update fleet.json
@@ -1458,6 +1478,36 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
     task_id: str = f"task_{uuid.uuid4().hex[:12]}"
     task_store.create_task(task_id)
     task_store.tasks[task_id]["is_bus_task"] = True
+
+    # Beacon devices skip firmware resolution — update_firmware.py handles everything
+    if req.method == "beacon":
+        async def generate_beacon() -> AsyncGenerator[str, None]:
+            services_stopped = False
+            try:
+                beacon_path = await flash_mgr.get_beacon_klipper_path()
+                if not beacon_path:
+                    yield "!!! Error: beacon_klipper not found in Moonraker update_manager. "
+                    yield "Ensure beacon_klipper is configured in moonraker.conf [update_manager].\n"
+                    return
+
+                yield await manage_klipper_services("stop")
+                services_stopped = True
+
+                task_store.update_device_status(task_id, req.device_id, "flashing")
+                async for log in flash_mgr.flash_beacon(req.device_id, beacon_path):
+                    if task_store.is_cancelled(task_id): return
+                    yield log
+
+                task_store.update_device_status(task_id, req.device_id, "ready")
+            except Exception as e:
+                yield f"!!! Error during beacon flash: {str(e)}\n"
+                task_store.update_device_status(task_id, req.device_id, "failed")
+            finally:
+                if services_stopped:
+                    yield await manage_klipper_services("start")
+                task_store.complete_task(task_id)
+
+        return StreamingResponse(generate_beacon(), media_type="text/plain", headers={"X-Task-Id": task_id})
 
     firmware_path: Optional[str] = resolve_firmware_path(req.profile, req.method)
     if firmware_path is None:
