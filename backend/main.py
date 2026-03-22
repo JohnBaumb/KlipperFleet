@@ -830,7 +830,10 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                     
                     device_statuses[dev['id']] = status
                     task_store.update_device_status(task_id, dev['id'], status)
-                    
+
+                    # Save the original fleet ID before any reboot/flash may mutate dev['id']
+                    dev['fleet_id'] = dev['id']
+
                     if status == "service":
                         # Reboot non-bridge devices that need bootloader entry.
                         # Skip serial devices without Katapult (e.g. AVR boards) — they flash directly.
@@ -840,11 +843,9 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                             and dev['method'] in ('can', 'serial', 'dfu')
                             and not (dev['method'] == 'serial' and not dev.get('is_katapult', True))
                         )
-                        # Preserve the fleet.json ID before reboot phase mutates dev['id']
-                        dev["fleet_id"] = dev["id"]
                         if needs_reboot:
                             reboot_tasks.append({
-                                "original_id": dev['id'], # Keep the original ID to find it in the devices list
+                                "original_id": dev['fleet_id'],  # Use saved fleet ID (set above for all devices)
                                 "id": dev['id'], 
                                 "method": dev['method'], 
                                 "name": dev['name'],
