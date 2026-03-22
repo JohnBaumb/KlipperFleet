@@ -1335,7 +1335,9 @@ async def get_fleet_versions() -> Dict[str, Any]:
             "flashed_version": dev.get('flashed_version'),
             "flashed_commit": dev.get('flashed_commit'),
             "last_flashed": dev.get('last_flashed'),
-            "live_version": None
+            "live_version": None,
+            "method": dev.get('method'),
+            "remote_version": None
         }
         
         # Try to find live version by device ID or check all MCU identifiers
@@ -1366,6 +1368,7 @@ async def get_fleet_versions() -> Dict[str, Any]:
                         for key, info in vi.items():
                             if isinstance(info, dict) and "beacon" in key.lower():
                                 dev_info["live_version"] = info.get("version")
+                                dev_info["remote_version"] = info.get("remote_version")
                                 break
             except Exception:
                 pass

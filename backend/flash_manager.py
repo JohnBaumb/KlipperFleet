@@ -33,7 +33,7 @@ class FlashManager:
         devices = []
         
         # 1. USB Serial devices (by-id is preferred for stability)
-        usb_devs: List[str] = glob.glob("/dev/serial/by-id/*")
+        usb_devs: List[str] = [d for d in glob.glob("/dev/serial/by-id/*") if "Beacon_Beacon_Rev" not in d]
         
         # 2. Common UART and CDC-ACM devices
         # Keep globs tight to avoid matching /dev/serial/ directories and by-id trees.

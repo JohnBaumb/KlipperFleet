@@ -1025,27 +1025,39 @@
 
                 const versionMatch = (deviceId) => {
                     const info = deviceVersions.value[deviceId];
+                    if (!info || !info.live_version) return true;
+                    if (info.method === 'beacon') {
+                        if (!info.remote_version) return true; // no remote data, assume up to date
+                        return info.live_version === info.remote_version;
+                    }
                     const host = systemKlipperVersion.value;
-                    if (!info || !host) return true; // no data to compare
-                    if (!info.live_version || !host.version || host.version === 'unknown') return true;
+                    if (!host || !host.version || host.version === 'unknown') return true;
                     return info.live_version === host.version;
                 };
 
                 const versionColor = (deviceId) => {
                     const info = deviceVersions.value[deviceId];
-                    const host = systemKlipperVersion.value;
-                    if (!info || !info.live_version || !host || !host.version || host.version === 'unknown') {
-                        return 'text-gray-500';
+                    if (!info || !info.live_version) return 'text-gray-500';
+                    if (info.method === 'beacon') {
+                        if (!info.remote_version) return 'text-gray-500';
+                        return versionMatch(deviceId) ? 'text-green-400' : 'text-orange-400';
                     }
+                    const host = systemKlipperVersion.value;
+                    if (!host || !host.version || host.version === 'unknown') return 'text-gray-500';
                     return versionMatch(deviceId) ? 'text-green-400' : 'text-orange-400';
                 };
 
                 const versionTitle = (deviceId) => {
                     const info = deviceVersions.value[deviceId];
-                    const host = systemKlipperVersion.value;
                     const parts = [];
-                    if (info?.live_version) parts.push(`Device: ${info.live_version}`);
-                    if (host?.version) parts.push(`System: ${host.version}`);
+                    if (info?.method === 'beacon') {
+                        if (info?.live_version) parts.push(`Beacon: ${info.live_version}`);
+                        if (info?.remote_version) parts.push(`Latest: ${info.remote_version}`);
+                    } else {
+                        const host = systemKlipperVersion.value;
+                        if (info?.live_version) parts.push(`Device: ${info.live_version}`);
+                        if (host?.version) parts.push(`System: ${host.version}`);
+                    }
                     if (info?.last_flashed) parts.push(`Flashed: ${info.last_flashed}`);
                     return parts.join(' | ');
                 };
