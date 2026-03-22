@@ -55,12 +55,6 @@ class TestFleetIdPreservation:
         assert dev["id"] == "/dev/serial/by-id/usb-katapult_stm32f103xe_AABB-if00"
         assert dev["fleet_id"] == "/dev/serial/by-id/usb-Kalico_stm32f103xe_AABB-if00"
 
-    def test_fleet_id_fallback_when_not_set(self):
-        """dev.get('fleet_id', dev['id']) should fall back to dev['id'] for safety."""
-        dev = {"id": "some_device", "method": "can"}
-        fleet_id = dev.get("fleet_id", dev["id"])
-        assert fleet_id == "some_device"
-
 
 # ---------------------------------------------------------------------------
 # Fix 2: Version metadata tracking in batch flash path

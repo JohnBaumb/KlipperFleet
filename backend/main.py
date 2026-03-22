@@ -1149,14 +1149,14 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
                                 # Update version info in fleet after successful flash
                                 build_info = build_mgr.get_last_build_info(dev["profile"])
                                 if build_info:
-                                    fleet_id = dev.get("fleet_id", dev["id"])
+                                    fleet_id = dev["fleet_id"]
                                     await fleet_mgr.update_device_version(fleet_id, build_info)
                                     ver = build_info.get("version", "unknown")
                                     commit = build_info.get("commit", "unknown")
                                     task_store.add_log(task_id, f">>> Version recorded: {ver} ({commit})\n")
 
                                 # Issue #17: Post-flash serial rescan for USB devices
-                                fleet_id = dev.get("fleet_id", dev["id"])
+                                fleet_id = dev["fleet_id"]
                                 if fleet_id.startswith("/dev/serial/by-id/"):
                                     task_store.add_log(task_id, ">>> Rescanning serial devices after flash...\n")
                                     await asyncio.sleep(3)
