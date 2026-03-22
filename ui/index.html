@@ -1026,7 +1026,11 @@
                 const versionMatch = (deviceId) => {
                     const info = deviceVersions.value[deviceId];
                     if (!info || !info.live_version) return true;
-                    if (info.method === 'beacon') return true; // no remote FW version available
+                    if (info.method === 'beacon') {
+                        if (!info.remote_version || info.remote_version.startsWith('git-')) return true;
+                        const live = info.live_version.replace(/^Beacon\s+/i, '');
+                        return live === info.remote_version;
+                    }
                     const host = systemKlipperVersion.value;
                     if (!host || !host.version || host.version === 'unknown') return true;
                     return info.live_version === host.version;
@@ -1035,7 +1039,10 @@
                 const versionColor = (deviceId) => {
                     const info = deviceVersions.value[deviceId];
                     if (!info || !info.live_version) return 'text-gray-500';
-                    if (info.method === 'beacon') return 'text-blue-400'; // informational, no remote comparison
+                    if (info.method === 'beacon') {
+                        if (!info.remote_version || info.remote_version.startsWith('git-')) return 'text-blue-400';
+                        return versionMatch(deviceId) ? 'text-green-400' : 'text-orange-400';
+                    }
                     const host = systemKlipperVersion.value;
                     if (!host || !host.version || host.version === 'unknown') return 'text-gray-500';
                     return versionMatch(deviceId) ? 'text-green-400' : 'text-orange-400';
@@ -1045,7 +1052,9 @@
                     const info = deviceVersions.value[deviceId];
                     const parts = [];
                     if (info?.method === 'beacon') {
-                        if (info?.live_version) parts.push(`Beacon FW: ${info.live_version}`);
+                        const live = info?.live_version ? info.live_version.replace(/^Beacon\s+/i, '') : null;
+                        if (live) parts.push(`Beacon FW: ${live}`);
+                        if (info?.remote_version) parts.push(`Available: ${info.remote_version}`);
                         if (info?.repo_version) parts.push(`Klipper plugin: ${info.repo_version}`);
                     } else {
                         const host = systemKlipperVersion.value;

@@ -282,3 +282,170 @@ class TestBeaconBatchExclusion:
         assert len(excluded) == 1
         assert excluded[0]["name"] == "Beacon RevH"
         assert len(active) == 2
+
+
+# ---------------------------------------------------------------------------
+# Beacon remote firmware version retrieval
+# ---------------------------------------------------------------------------
+
+
+class TestBeaconRemoteVersion:
+    """Tests for beacon remote firmware version via git history fallback chain."""
+
+    @pytest.fixture
+    def _mock_fleet_env(self):
+        """Provide common mocks for get_fleet_versions beacon path."""
+        fleet = [{"id": "beacon-1", "method": "beacon"}]
+        mcu_versions = {}
+        return fleet, mcu_versions
+
+    def _make_subprocess_mock(self, stdout_bytes, returncode=0):
+        proc = AsyncMock()
+        proc.communicate = AsyncMock(return_value=(stdout_bytes, b""))
+        proc.returncode = returncode
+        return proc
+
+    @patch("backend.main.asyncio.create_subprocess_exec")
+    @patch("backend.main.flash_mgr")
+    @patch("backend.main.fleet_mgr")
+    def test_extracts_semver_from_commit_message(
+        self, mock_fleet_mgr, mock_flash_mgr, mock_subproc, _mock_fleet_env
+    ):
+        fleet, mcu_versions = _mock_fleet_env
+        mock_fleet_mgr.get_fleet = AsyncMock(return_value=fleet)
+        mock_flash_mgr.get_mcu_versions = AsyncMock(return_value=mcu_versions)
+        mock_flash_mgr.get_beacon_klipper_path = AsyncMock(return_value="/home/pi/beacon_klipper")
+
+        # MCU query returns beacon FW version
+        mcu_resp = MagicMock()
+        mcu_resp.status_code = 200
+        mcu_resp.json.return_value = {
+            "result": {"status": {"mcu beacon": {"mcu_version": "Beacon 2.1.0"}}}
+        }
+        # update_manager response
+        um_resp = MagicMock()
+        um_resp.status_code = 200
+        um_resp.json.return_value = {"result": {"version_info": {}}}
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=[mcu_resp, um_resp])
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        # git log commit message with version
+        mock_subproc.return_value = self._make_subprocess_mock(b"firmware: version 2.1.0 release")
+
+        from backend.main import get_fleet_versions
+
+        with patch("backend.main.httpx.AsyncClient", return_value=mock_client):
+            result = asyncio.get_event_loop().run_until_complete(get_fleet_versions())
+
+        assert result["beacon-1"]["remote_version"] == "2.1.0"
+
+    @patch("backend.main.asyncio.create_subprocess_exec")
+    @patch("backend.main.flash_mgr")
+    @patch("backend.main.fleet_mgr")
+    def test_falls_back_to_git_tag(
+        self, mock_fleet_mgr, mock_flash_mgr, mock_subproc, _mock_fleet_env
+    ):
+        fleet, mcu_versions = _mock_fleet_env
+        mock_fleet_mgr.get_fleet = AsyncMock(return_value=fleet)
+        mock_flash_mgr.get_mcu_versions = AsyncMock(return_value=mcu_versions)
+        mock_flash_mgr.get_beacon_klipper_path = AsyncMock(return_value="/home/pi/beacon_klipper")
+
+        mcu_resp = MagicMock()
+        mcu_resp.status_code = 200
+        mcu_resp.json.return_value = {
+            "result": {"status": {"mcu beacon": {"mcu_version": "Beacon 2.0.0"}}}
+        }
+        um_resp = MagicMock()
+        um_resp.status_code = 200
+        um_resp.json.return_value = {"result": {"version_info": {}}}
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=[mcu_resp, um_resp])
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        # commit msg has no version, then hash, then tag
+        msg_proc = self._make_subprocess_mock(b"fix enumeration bug for fast hosts.")
+        hash_proc = self._make_subprocess_mock(b"a4d1ebe123456789")
+        tag_proc = self._make_subprocess_mock(b"v2.0.0", returncode=0)
+        mock_subproc.side_effect = [msg_proc, hash_proc, tag_proc]
+
+        from backend.main import get_fleet_versions
+
+        with patch("backend.main.httpx.AsyncClient", return_value=mock_client):
+            result = asyncio.get_event_loop().run_until_complete(get_fleet_versions())
+
+        assert result["beacon-1"]["remote_version"] == "2.0.0"
+
+    @patch("backend.main.asyncio.create_subprocess_exec")
+    @patch("backend.main.flash_mgr")
+    @patch("backend.main.fleet_mgr")
+    def test_falls_back_to_commit_hash(
+        self, mock_fleet_mgr, mock_flash_mgr, mock_subproc, _mock_fleet_env
+    ):
+        fleet, mcu_versions = _mock_fleet_env
+        mock_fleet_mgr.get_fleet = AsyncMock(return_value=fleet)
+        mock_flash_mgr.get_mcu_versions = AsyncMock(return_value=mcu_versions)
+        mock_flash_mgr.get_beacon_klipper_path = AsyncMock(return_value="/home/pi/beacon_klipper")
+
+        mcu_resp = MagicMock()
+        mcu_resp.status_code = 200
+        mcu_resp.json.return_value = {
+            "result": {"status": {"mcu beacon": {"mcu_version": "Beacon 2.0.0"}}}
+        }
+        um_resp = MagicMock()
+        um_resp.status_code = 200
+        um_resp.json.return_value = {"result": {"version_info": {}}}
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=[mcu_resp, um_resp])
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        # no version in msg, tag fails, falls back to short hash
+        msg_proc = self._make_subprocess_mock(b"Beacon Contact")
+        hash_proc = self._make_subprocess_mock(b"f973242abc")
+        tag_proc = self._make_subprocess_mock(b"", returncode=128)
+        short_proc = self._make_subprocess_mock(b"f973242")
+        mock_subproc.side_effect = [msg_proc, hash_proc, tag_proc, short_proc]
+
+        from backend.main import get_fleet_versions
+
+        with patch("backend.main.httpx.AsyncClient", return_value=mock_client):
+            result = asyncio.get_event_loop().run_until_complete(get_fleet_versions())
+
+        assert result["beacon-1"]["remote_version"] == "git-f973242"
+
+    @patch("backend.main.flash_mgr")
+    @patch("backend.main.fleet_mgr")
+    def test_remote_version_none_when_no_beacon_path(
+        self, mock_fleet_mgr, mock_flash_mgr, _mock_fleet_env
+    ):
+        fleet, mcu_versions = _mock_fleet_env
+        mock_fleet_mgr.get_fleet = AsyncMock(return_value=fleet)
+        mock_flash_mgr.get_mcu_versions = AsyncMock(return_value=mcu_versions)
+        mock_flash_mgr.get_beacon_klipper_path = AsyncMock(return_value=None)
+
+        mcu_resp = MagicMock()
+        mcu_resp.status_code = 200
+        mcu_resp.json.return_value = {
+            "result": {"status": {"mcu beacon": {"mcu_version": "Beacon 2.1.0"}}}
+        }
+        um_resp = MagicMock()
+        um_resp.status_code = 200
+        um_resp.json.return_value = {"result": {"version_info": {}}}
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=[mcu_resp, um_resp])
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        from backend.main import get_fleet_versions
+
+        with patch("backend.main.httpx.AsyncClient", return_value=mock_client):
+            result = asyncio.get_event_loop().run_until_complete(get_fleet_versions())
+
+        assert result["beacon-1"].get("remote_version") is None

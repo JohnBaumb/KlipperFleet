@@ -1369,9 +1369,54 @@ async def get_fleet_versions() -> Dict[str, Any]:
                         fw_version = mcu_beacon.get("mcu_version")
                         if fw_version:
                             dev_info["live_version"] = fw_version
-                    # No remote firmware version available via API
-                    dev_info["remote_version"] = None
-                    # 2. Repo (beacon_klipper) version from update_manager (informational only)
+                    # 2. Determine remote firmware version from beacon_klipper git history
+                    beacon_path = await flash_mgr.get_beacon_klipper_path()
+                    if beacon_path:
+                        try:
+                            # Fallback 1: extract semver from latest firmware commit message
+                            proc = await asyncio.create_subprocess_exec(
+                                "git", "log", "-1", "--format=%s", "--", "firmware/*.dfu",
+                                cwd=beacon_path,
+                                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                            )
+                            stdout, _ = await proc.communicate()
+                            msg = stdout.decode().strip()
+                            ver_match = re.search(r"(\d+\.\d+\.\d+)", msg)
+                            if ver_match:
+                                dev_info["remote_version"] = ver_match.group(1)
+                            else:
+                                # Fallback 2: closest tag to that commit
+                                proc_hash = await asyncio.create_subprocess_exec(
+                                    "git", "log", "-1", "--format=%H", "--", "firmware/*.dfu",
+                                    cwd=beacon_path,
+                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                                )
+                                stdout_h, _ = await proc_hash.communicate()
+                                commit_hash = stdout_h.decode().strip()
+                                if commit_hash:
+                                    proc_tag = await asyncio.create_subprocess_exec(
+                                        "git", "describe", "--tags", "--abbrev=0", commit_hash,
+                                        cwd=beacon_path,
+                                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                                    )
+                                    stdout_t, _ = await proc_tag.communicate()
+                                    tag = stdout_t.decode().strip()
+                                    if proc_tag.returncode == 0 and tag:
+                                        dev_info["remote_version"] = re.sub(r"^v", "", tag)
+                                    else:
+                                        # Fallback 3: short hash
+                                        proc_short = await asyncio.create_subprocess_exec(
+                                            "git", "log", "-1", "--format=%h", "--", "firmware/*.dfu",
+                                            cwd=beacon_path,
+                                            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                                        )
+                                        stdout_s, _ = await proc_short.communicate()
+                                        short = stdout_s.decode().strip()
+                                        if short:
+                                            dev_info["remote_version"] = f"git-{short}"
+                        except Exception:
+                            pass
+                    # 3. Repo (beacon_klipper) version from update_manager (informational only)
                     um_resp = await client.get("http://127.0.0.1:7125/machine/update/status", timeout=5.0)
                     if um_resp.status_code == 200:
                         vi = um_resp.json().get("result", {}).get("version_info", {})
