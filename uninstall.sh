@@ -102,5 +102,20 @@ if [ -f "$NAVI_JSON" ]; then
     echo "KlipperFleet: Mainsail navigation entry removed."
 fi
 
+# 8. Remove Fluidd Navigation Integration
+echo "KlipperFleet: Removing Fluidd navigation entry..."
+python3 "${SRCDIR}/install_scripts/setup_fluidd_navi.py" --remove || true
+
+# Remove redirect shim and persistent_files entry
+FLUIDD_ROOT="/home/${USER}/fluidd"
+if [ -f "$FLUIDD_ROOT/klipperfleet.html" ]; then
+    rm "$FLUIDD_ROOT/klipperfleet.html"
+    echo "KlipperFleet: Fluidd redirect shim removed."
+fi
+MOONRAKER_CONF="${MOONRAKER_CONFIG_DIR}/moonraker.conf"
+python3 "${SRCDIR}/install_scripts/setup_moonraker.py" \
+    --remove-persistent-file fluidd klipperfleet.html \
+    "$MOONRAKER_CONF" || true
+
 echo "KlipperFleet: Uninstallation complete."
 echo "Note: The repository at ${SRCDIR} has not been removed. You can delete it manually if desired."
