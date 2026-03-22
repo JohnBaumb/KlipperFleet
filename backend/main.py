@@ -1358,17 +1358,27 @@ async def get_fleet_versions() -> Dict[str, Any]:
                     dev_info["live_version"] = mcu_info.get("version")
                     break
 
-        # Beacon version: parse from Moonraker update_manager status
+        # Beacon version: firmware from Klipper MCU query, repo info from update_manager
         if dev.get('method') == 'beacon' and dev_info["live_version"] is None:
             try:
                 async with httpx.AsyncClient() as client:
-                    resp = await client.get("http://127.0.0.1:7125/machine/update/status", timeout=5.0)
-                    if resp.status_code == 200:
-                        vi = resp.json().get("result", {}).get("version_info", {})
+                    # 1. Firmware version from Klipper MCU query
+                    mcu_resp = await client.get("http://127.0.0.1:7125/printer/objects/query?mcu+beacon", timeout=5.0)
+                    if mcu_resp.status_code == 200:
+                        mcu_beacon = mcu_resp.json().get("result", {}).get("status", {}).get("mcu beacon", {})
+                        fw_version = mcu_beacon.get("mcu_version")
+                        if fw_version:
+                            dev_info["live_version"] = fw_version
+                    # No remote firmware version available via API
+                    dev_info["remote_version"] = None
+                    # 2. Repo (beacon_klipper) version from update_manager (informational only)
+                    um_resp = await client.get("http://127.0.0.1:7125/machine/update/status", timeout=5.0)
+                    if um_resp.status_code == 200:
+                        vi = um_resp.json().get("result", {}).get("version_info", {})
                         for key, info in vi.items():
                             if isinstance(info, dict) and "beacon" in key.lower():
-                                dev_info["live_version"] = info.get("version")
-                                dev_info["remote_version"] = info.get("remote_version")
+                                dev_info["repo_version"] = info.get("version")
+                                dev_info["repo_remote_version"] = info.get("remote_version")
                                 break
             except Exception:
                 pass

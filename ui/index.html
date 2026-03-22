@@ -1026,10 +1026,7 @@
                 const versionMatch = (deviceId) => {
                     const info = deviceVersions.value[deviceId];
                     if (!info || !info.live_version) return true;
-                    if (info.method === 'beacon') {
-                        if (!info.remote_version) return true; // no remote data, assume up to date
-                        return info.live_version === info.remote_version;
-                    }
+                    if (info.method === 'beacon') return true; // no remote FW version available
                     const host = systemKlipperVersion.value;
                     if (!host || !host.version || host.version === 'unknown') return true;
                     return info.live_version === host.version;
@@ -1038,10 +1035,7 @@
                 const versionColor = (deviceId) => {
                     const info = deviceVersions.value[deviceId];
                     if (!info || !info.live_version) return 'text-gray-500';
-                    if (info.method === 'beacon') {
-                        if (!info.remote_version) return 'text-gray-500';
-                        return versionMatch(deviceId) ? 'text-green-400' : 'text-orange-400';
-                    }
+                    if (info.method === 'beacon') return 'text-blue-400'; // informational, no remote comparison
                     const host = systemKlipperVersion.value;
                     if (!host || !host.version || host.version === 'unknown') return 'text-gray-500';
                     return versionMatch(deviceId) ? 'text-green-400' : 'text-orange-400';
@@ -1051,8 +1045,8 @@
                     const info = deviceVersions.value[deviceId];
                     const parts = [];
                     if (info?.method === 'beacon') {
-                        if (info?.live_version) parts.push(`Beacon: ${info.live_version}`);
-                        if (info?.remote_version) parts.push(`Latest: ${info.remote_version}`);
+                        if (info?.live_version) parts.push(`Beacon FW: ${info.live_version}`);
+                        if (info?.repo_version) parts.push(`Klipper plugin: ${info.repo_version}`);
                     } else {
                         const host = systemKlipperVersion.value;
                         if (info?.live_version) parts.push(`Device: ${info.live_version}`);
