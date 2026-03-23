@@ -28,10 +28,26 @@ class FlashManager:
         self._can_cache_time: Dict[str, float] = {}
         self._can_cache_ttl_s: float = 2.0 # Short TTL to keep status feeling "live"
 
+    @staticmethod
+    def _is_beacon_device(dev_path: str) -> bool:
+        """Return True if *dev_path* (or the symlink it resolves to) is a Beacon probe.
+
+        Beacon devices are managed through the dedicated beacon flash flow and
+        must never appear in the generic serial discovery results.
+        """
+        if "beacon" in dev_path.lower():
+            return True
+        try:
+            if os.path.islink(dev_path) and "beacon" in os.path.realpath(dev_path).lower():
+                return True
+        except OSError:
+            pass
+        return False
+
     async def discover_serial_devices(self, skip_moonraker: bool = False) -> List[Dict[str, str]]:
         """Lists all serial devices in /dev/serial/by-id/ and common UART ports."""
         devices = []
-        
+
         # 1. USB Serial devices (by-id is preferred for stability)
         usb_devs: List[str] = [d for d in glob.glob("/dev/serial/by-id/*") if "Beacon_Beacon_Rev" not in d]
         
@@ -155,7 +171,16 @@ class FlashManager:
             cfg_name = f"{meta['name']} ({os.path.basename(cfg_id)})"
             devices.append({"id": cfg_id, "name": cfg_name, "type": "uart", "mode": "service"})
             seen_real_paths.add(cfg_real)
-                
+
+        # Remove any device whose underlying physical node belongs to a Beacon probe.
+        # The by-id filter (line 52) excludes Beacon symlinks, but the raw /dev/ttyACM*
+        # node can still slip through the dedup logic.
+        beacon_real_paths: set = set()
+        for bp in glob.glob("/dev/serial/by-id/*Beacon_Beacon_Rev*"):
+            beacon_real_paths.add(os.path.realpath(bp))
+        if beacon_real_paths:
+            devices = [d for d in devices if os.path.realpath(d["id"]) not in beacon_real_paths]
+
         return devices
 
     async def discover_dfu_devices(self) -> List[Dict[str, str]]:

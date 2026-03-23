@@ -436,19 +436,21 @@
                             <div v-if="devices.beacon && devices.beacon.length > 0">
                                 <h4 class="text-xs font-bold text-gray-400 mb-2 uppercase tracking-wider">Beacon Probes</h4>
                                 <div v-for="dev in devices.beacon" :key="dev.id" class="flex items-center justify-between p-3 bg-gray-800 rounded mb-2">
-                                    <div class="flex items-center">
+                                    <div class="overflow-hidden flex items-center">
                                         <i v-if="dev.managed" class="fas fa-check-circle text-green-500 mr-3 flex-none" title="Managed in Fleet"></i>
-                                        <div>
+                                        <div class="overflow-hidden">
                                             <div class="flex items-center space-x-2">
-                                                <p class="text-sm font-bold text-gray-100">{{ dev.name }}</p>
+                                                <p class="text-sm font-bold truncate text-gray-100">{{ dev.name }}</p>
                                                 <span class="text-[8px] bg-teal-900 text-teal-200 px-1 rounded font-bold uppercase">{{ dev.revision }}</span>
                                             </div>
                                             <p class="text-[10px] text-gray-400 font-mono truncate">{{ dev.id }}</p>
                                         </div>
                                     </div>
-                                    <button @click="addDeviceToFleet(dev, 'beacon')" class="text-blue-400 hover:text-blue-300 text-sm">
-                                        <i class="fas fa-plus-circle"></i>
-                                    </button>
+                                    <div class="flex items-center space-x-2 flex-none ml-2">
+                                        <button @click="addDeviceToFleet(dev, 'beacon')" class="text-blue-400 hover:text-blue-300 text-sm">
+                                            <i class="fas fa-plus-circle"></i>
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
                         </div>
