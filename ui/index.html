@@ -357,7 +357,7 @@
                                         <button @click="attachToFleet(dev, 'serial')" class="text-orange-400 hover:text-orange-300 text-xs" title="Attach to existing fleet device">
                                             <i class="fas fa-link"></i>
                                         </button>
-                                        <button @click="addDeviceToFleet(dev, 'serial')" class="text-blue-400 hover:text-blue-300 text-sm">
+                                        <button v-if="!dev.managed" @click="addDeviceToFleet(dev, 'serial')" class="text-blue-400 hover:text-blue-300 text-sm">
                                             <i class="fas fa-plus-circle"></i>
                                         </button>
                                     </div>
@@ -386,7 +386,7 @@
                                                 :title="dev.mode === 'ready' ? 'Restart to Firmware' : 'Reboot to Katapult'">
                                             <i class="fas fa-power-off"></i>
                                         </button>
-                                        <button @click="addDeviceToFleet(dev, 'can')" class="text-blue-400 hover:text-blue-300 text-sm flex-none ml-2">
+                                        <button v-if="!dev.managed" @click="addDeviceToFleet(dev, 'can')" class="text-blue-400 hover:text-blue-300 text-sm flex-none ml-2">
                                             <i class="fas fa-plus-circle"></i>
                                         </button>
                                     </div>
@@ -410,7 +410,7 @@
                                         <button @click="attachToFleet(dev, 'dfu')" class="text-orange-400 hover:text-orange-300 text-xs" title="Attach to existing fleet device">
                                             <i class="fas fa-link"></i>
                                         </button>
-                                        <button @click="addDeviceToFleet(dev, 'dfu')" class="text-blue-400 hover:text-blue-300 text-sm">
+                                        <button v-if="!dev.managed" @click="addDeviceToFleet(dev, 'dfu')" class="text-blue-400 hover:text-blue-300 text-sm">
                                             <i class="fas fa-plus-circle"></i>
                                         </button>
                                     </div>
@@ -427,7 +427,7 @@
                                             <p class="text-[10px] text-gray-400 font-mono">{{ dev.id }}</p>
                                         </div>
                                     </div>
-                                    <button @click="addDeviceToFleet(dev, 'linux')" class="text-blue-400 hover:text-blue-300 text-sm">
+                                    <button v-if="!dev.managed" @click="addDeviceToFleet(dev, 'linux')" class="text-blue-400 hover:text-blue-300 text-sm">
                                         <i class="fas fa-plus-circle"></i>
                                     </button>
                                 </div>
@@ -447,7 +447,7 @@
                                         </div>
                                     </div>
                                     <div class="flex items-center space-x-2 flex-none ml-2">
-                                        <button @click="addDeviceToFleet(dev, 'beacon')" class="text-blue-400 hover:text-blue-300 text-sm">
+                                        <button v-if="!dev.managed" @click="addDeviceToFleet(dev, 'beacon')" class="text-blue-400 hover:text-blue-300 text-sm">
                                             <i class="fas fa-plus-circle"></i>
                                         </button>
                                     </div>
