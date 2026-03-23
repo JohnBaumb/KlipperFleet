@@ -119,8 +119,12 @@ sudo -u $USER mkdir -p "$KF_DATA_DIR/ui"
 log_info "Deploying UI files..."
 echo "Deploying UI from ${SRCDIR}/ui to $KF_DATA_DIR/ui/" >> "$LOG_FILE"
 if [ -d "${SRCDIR}/ui" ]; then
-    sudo -u $USER cp -r "${SRCDIR}/ui/"* "$KF_DATA_DIR/ui/"
-    echo "UI deployment command executed." >> "$LOG_FILE"
+    if [ -L "$KF_DATA_DIR/ui/index.html" ]; then
+        echo "UI is symlinked; skipping copy." >> "$LOG_FILE"
+    else
+        sudo -u $USER cp -r "${SRCDIR}/ui/"* "$KF_DATA_DIR/ui/"
+        echo "UI deployment command executed." >> "$LOG_FILE"
+    fi
 else
     echo "UI directory not found in SRCDIR!" >> "$LOG_FILE"
     log_warn "UI directory not found at ${SRCDIR}/ui (continuing)."

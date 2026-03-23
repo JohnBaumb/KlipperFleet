@@ -54,3 +54,44 @@ async def test_remove_device(fleet_mgr):
     
     await fleet_mgr.remove_device("test_id")
     assert len(await fleet_mgr.get_fleet()) == 0
+
+
+# ---------------------------------------------------------------------------
+# Issue #17: update_device_id for post-flash serial rescan
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_device_id_method(fleet_mgr):
+    """update_device_id() should change the id field in fleet.json."""
+    device = {
+        "id": "/dev/serial/by-id/usb-Klipper_rp2040_E66160F42367B137-if00",
+        "name": "PIS V1",
+        "method": "serial",
+        "profile": "Fysetc PIS V1"
+    }
+    await fleet_mgr.save_device(device)
+
+    updated = await fleet_mgr.update_device_id(
+        "/dev/serial/by-id/usb-Klipper_rp2040_E66160F42367B137-if00",
+        "/dev/serial/by-id/usb-CustomFork_rp2040_E66160F42367B137-if00"
+    )
+    assert updated is True
+
+    fleet = await fleet_mgr.get_fleet()
+    assert len(fleet) == 1
+    assert fleet[0]["id"] == "/dev/serial/by-id/usb-CustomFork_rp2040_E66160F42367B137-if00"
+    assert fleet[0]["name"] == "PIS V1"
+
+
+@pytest.mark.asyncio
+async def test_update_device_id_not_found(fleet_mgr):
+    """update_device_id() should return False if old_id doesn't exist."""
+    device = {"id": "some_other_device", "name": "Other"}
+    await fleet_mgr.save_device(device)
+
+    updated = await fleet_mgr.update_device_id("nonexistent_id", "new_id")
+    assert updated is False
+
+    fleet = await fleet_mgr.get_fleet()
+    assert fleet[0]["id"] == "some_other_device"

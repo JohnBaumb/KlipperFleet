@@ -590,12 +590,12 @@ class TestLinuxProcessFlash:
 # ---------------------------------------------------------------------------
 
 
-class TestAvrDeviceFlash:
-    """Tests for AVR (non-Katapult) serial device flashing via avrdude/make flash."""
+class TestMakeFlash:
+    """Tests for non-Katapult serial device flashing via make flash (AVR, RP2040, etc.)."""
 
     @pytest.mark.asyncio
-    async def test_flash_avr_copies_config_and_runs_make_flash(self):
-        """flash_avr should copy the profile config then run make flash FLASH_DEVICE=<path>."""
+    async def test_flash_make_copies_config_and_runs_make_flash(self):
+        """flash_make should copy the profile config then run make flash FLASH_DEVICE=<path>."""
         mgr = FlashManager("/tmp/klipper", "/tmp/katapult")
 
         executed_cmds = []
@@ -612,7 +612,7 @@ class TestAvrDeviceFlash:
         with patch("asyncio.create_subprocess_exec", side_effect=mock_subprocess), \
              patch("shutil.copy") as mock_copy:
             logs = []
-            async for line in mgr.flash_avr(
+            async for line in mgr.flash_make(
                 "/dev/serial/by-id/usb-FTDI_FT232R-if00-port0",
                 "/tmp/artifacts/2560.elf",
                 "/tmp/profiles/2560.config"
@@ -628,11 +628,11 @@ class TestAvrDeviceFlash:
         assert "make" in cmd
         assert "flash" in cmd
         assert any("FLASH_DEVICE=" in arg for arg in cmd)
-        assert "AVR flash successful" in combined
+        assert "Flashing successful" in combined
 
     @pytest.mark.asyncio
-    async def test_flash_avr_reports_failure(self):
-        """flash_avr should report failure when make flash returns non-zero."""
+    async def test_flash_make_reports_failure(self):
+        """flash_make should report failure when make flash returns non-zero."""
         mgr = FlashManager("/tmp/klipper", "/tmp/katapult")
 
         async def mock_subprocess(*args, **kwargs):
@@ -646,7 +646,7 @@ class TestAvrDeviceFlash:
         with patch("asyncio.create_subprocess_exec", side_effect=mock_subprocess), \
              patch("shutil.copy"):
             logs = []
-            async for line in mgr.flash_avr(
+            async for line in mgr.flash_make(
                 "/dev/serial/by-id/test",
                 "/tmp/artifacts/2560.elf",
                 "/tmp/profiles/2560.config"
@@ -654,16 +654,16 @@ class TestAvrDeviceFlash:
                 logs.append(line)
 
         combined = "".join(logs)
-        assert "AVR flash failed" in combined
+        assert "Flashing failed" in combined
 
     @pytest.mark.asyncio
-    async def test_flash_avr_handles_config_copy_error(self):
-        """flash_avr should yield an error if the config file cannot be copied."""
+    async def test_flash_make_handles_config_copy_error(self):
+        """flash_make should yield an error if the config file cannot be copied."""
         mgr = FlashManager("/tmp/klipper", "/tmp/katapult")
 
         with patch("shutil.copy", side_effect=FileNotFoundError("No such file")):
             logs = []
-            async for line in mgr.flash_avr(
+            async for line in mgr.flash_make(
                 "/dev/serial/by-id/test",
                 "/tmp/artifacts/2560.elf",
                 "/tmp/profiles/missing.config"
