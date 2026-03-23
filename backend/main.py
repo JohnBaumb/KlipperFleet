@@ -452,19 +452,6 @@ async def get_health() -> Dict[str, Any]:
     return {"healthy": len(issues) == 0, "issues": issues}
 
 
-@app.get("/api/ui-title")
-async def get_ui_title(url: str) -> Dict[str, str]:
-    """Fetch the <title> of a printer UI page (Mainsail/Fluidd) server-side."""
-    import httpx
-    try:
-        async with httpx.AsyncClient(timeout=3) as client:
-            resp = await client.get(url)
-            m = re.search(r"<title>(.*?)</title>", resp.text, re.IGNORECASE)
-            return {"title": m.group(1) if m else "Printer"}
-    except Exception:
-        return {"title": "Printer"}
-
-
 @app.get("/api/print_status")
 async def get_print_status() -> Dict[str, Any]:
     """Returns whether any printer is currently printing (via Moonraker)."""

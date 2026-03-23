@@ -810,14 +810,7 @@
                 const error = ref(null);
                 const printerUrl = ref('');
                 const printerTitle = ref('Printer');
-                const hasReferrer = ref(!!document.referrer);
-                if (document.referrer) {
-                    printerUrl.value = new URL(document.referrer).origin;
-                    fetch('/api/ui-title?url=' + encodeURIComponent(printerUrl.value))
-                        .then(r => r.json())
-                        .then(data => { if (data.title) printerTitle.value = data.title; })
-                        .catch(() => {});
-                }
+                const hasReferrer = ref(false);
                 const showRawSymbolNames = ref(localStorage.getItem('kf_show_raw_symbols') === 'true');
                 const showOptionalFeatures = ref(localStorage.getItem('kf_show_optional') === 'true');
                 const isKlipperKconfiglib = ref(true);
@@ -1713,7 +1706,31 @@
                     }, 10);
                 };
 
-                onMounted(() => {
+                onMounted(async () => {
+                    // Resolve return-link from document.referrer (client-side only)
+                    if (document.referrer) {
+                        try {
+                            const referrerUrl = new URL(document.referrer);
+                            printerUrl.value = document.referrer;
+                            hasReferrer.value = true;
+                            try {
+                                const resp = await fetch(referrerUrl.origin + '/manifest.webmanifest');
+                                if (resp.ok) {
+                                    const manifest = await resp.json();
+                                    if (manifest.name) {
+                                        const name = manifest.name;
+                                        printerTitle.value = name.charAt(0).toUpperCase() + name.slice(1);
+                                    }
+                                }
+                            } catch {
+                                // CORS or network error — keep default
+                            }
+                        } catch {
+                            // Invalid referrer URL — hide link
+                            hasReferrer.value = false;
+                        }
+                    }
+
                     fetchProfiles().then(() => {
                         if (selectedProfile.value && !profiles.value.includes(selectedProfile.value)) {
                             selectedProfile.value = '';
