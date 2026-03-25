@@ -1714,13 +1714,19 @@
                             printerUrl.value = document.referrer;
                             hasReferrer.value = true;
                             try {
-                                const resp = await fetch(referrerUrl.origin + '/manifest.webmanifest');
-                                if (resp.ok) {
-                                    const manifest = await resp.json();
-                                    if (manifest.name) {
-                                        const name = manifest.name;
-                                        printerTitle.value = name.charAt(0).toUpperCase() + name.slice(1);
-                                    }
+                                let manifest = null;
+                                for (const path of ['/manifest.webmanifest', '/manifest.json']) {
+                                    try {
+                                        const resp = await fetch(referrerUrl.origin + path);
+                                        if (resp.ok) {
+                                            manifest = await resp.json();
+                                            break;
+                                        }
+                                    } catch { /* try next */ }
+                                }
+                                if (manifest && manifest.name) {
+                                    const name = manifest.name;
+                                    printerTitle.value = name.charAt(0).toUpperCase() + name.slice(1);
                                 }
                             } catch {
                                 // CORS or network error — keep default
