@@ -1595,6 +1595,9 @@
                         exclude_from_batch: isBeacon  // beacon uses update_firmware.py, not batch pipeline; always excluded
                     };
                     try {
+                        // Save original devices state in case we need to restore
+                        const originalDevices = JSON.parse(JSON.stringify(devices.value));
+
                         const res = await fetch('/fleet/device', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
@@ -1624,7 +1627,9 @@
                         await fetchFleet();
                         await discoverDevices();
                     } catch (e) {
-                        await showAlert("Error", "Error: " + e.message);
+                        // Restore original devices state on error
+                        devices.value = originalDevices;
+                        await showAlert("Error", "Failed to add device: " + e.message + ". Please try again.");
                     }
                 };
 
@@ -1704,6 +1709,10 @@
                 const removeDeviceFromFleet = async (id) => {
                     if (!await showConfirm("Remove Device", "Remove this device from your fleet?")) return;
                     try {
+                        // Save original state in case we need to restore
+                        const originalFleet = JSON.parse(JSON.stringify(fleet.value));
+                        const originalDevices = JSON.parse(JSON.stringify(devices.value));
+
                         // Optimistic UI update: immediately remove from fleet
                         const idx = fleet.value.findIndex(d => d.id === id);
                         if (idx >= 0) {
@@ -1727,17 +1736,13 @@
                         }
 
                         // Refresh in background (non-blocking)
-                        const removedId = id;
                         fetchFleet().catch(() => {}); // Silent background refresh
-                        // Optionally refresh discovered devices, but don't await
                         discoverDevices().catch(() => {});
                     } catch (e) {
-                        // Re-add the device if removal failed
-                        const idx = fleet.value.findIndex(d => d.id === id);
-                        if (idx < 0) {
-                            await fetchFleet(); // Restore from server
-                        }
-                        await showAlert("Error", "Error: " + e.message);
+                        // Restore original state on error
+                        fleet.value = originalFleet;
+                        devices.value = originalDevices;
+                        await showAlert("Error", "Failed to remove device: " + e.message + ". Please try again.");
                     }
                 };
 
