@@ -1,4 +1,5 @@
 import os
+import re
 import asyncio
 import glob
 import httpx
@@ -27,12 +28,15 @@ class FlashManager:
         self._can_cache_time: Dict[str, float] = {}
         self._can_cache_ttl_s: float = 2.0 # Short TTL to keep status feeling "live"
 
+        # Beacon path cache: resolved once at startup, refreshable on demand
+        self._beacon_klipper_path: Optional[str] = None
+
     async def discover_serial_devices(self, skip_moonraker: bool = False) -> List[Dict[str, str]]:
         """Lists all serial devices in /dev/serial/by-id/ and common UART ports."""
         devices = []
-        
+
         # 1. USB Serial devices (by-id is preferred for stability)
-        usb_devs: List[str] = glob.glob("/dev/serial/by-id/*")
+        usb_devs: List[str] = [d for d in glob.glob("/dev/serial/by-id/*") if "Beacon_Beacon_Rev" not in d]
         
         # 2. Common UART and CDC-ACM devices
         # Keep globs tight to avoid matching /dev/serial/ directories and by-id trees.
@@ -154,7 +158,16 @@ class FlashManager:
             cfg_name = f"{meta['name']} ({os.path.basename(cfg_id)})"
             devices.append({"id": cfg_id, "name": cfg_name, "type": "uart", "mode": "service"})
             seen_real_paths.add(cfg_real)
-                
+
+        # Remove any device whose underlying physical node belongs to a Beacon probe.
+        # The by-id filter (line 52) excludes Beacon symlinks, but the raw /dev/ttyACM*
+        # node can still slip through the dedup logic.
+        beacon_real_paths: set = set()
+        for bp in glob.glob("/dev/serial/by-id/*Beacon_Beacon_Rev*"):
+            beacon_real_paths.add(os.path.realpath(bp))
+        if beacon_real_paths:
+            devices = [d for d in devices if os.path.realpath(d["id"]) not in beacon_real_paths]
+
         return devices
 
     async def discover_dfu_devices(self) -> List[Dict[str, str]]:
@@ -733,6 +746,76 @@ class FlashManager:
         
         return device_id
 
+    async def refresh_beacon_path(self) -> Optional[str]:
+        """Refreshes the beacon_klipper path by querying Moonraker's /server/config API."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response: httpx.Response = await client.get(
+                    "http://127.0.0.1:7125/server/config", timeout=5.0
+                )
+                if response.status_code != 200:
+                    return None
+                data = response.json()
+                config: Dict[str, Any] = data.get("result", {}).get("config", {})
+                for key, section in config.items():
+                    if not key.startswith("update_manager "):
+                        continue
+                    if "beacon" not in key.lower():
+                        continue
+                    raw_path: Optional[str] = section.get("path")
+                    if raw_path:
+                        self._beacon_klipper_path = os.path.expanduser(raw_path)
+                        return self._beacon_klipper_path
+        except Exception as e:
+            logger.warning("Failed to query Moonraker for beacon_klipper path: %s", e)
+        return None
+
+    async def get_beacon_klipper_path(self) -> Optional[str]:
+        """Returns cached beacon_klipper path, or refreshes it if not yet cached."""
+        if self._beacon_klipper_path is not None:
+            return self._beacon_klipper_path
+        return await self.refresh_beacon_path()
+
+    async def discover_beacon_devices(self) -> List[Dict[str, str]]:
+        """Discovers Beacon probes by scanning /dev/serial/by-id/ for Beacon device paths."""
+        devices: List[Dict[str, str]] = []
+        beacon_pattern: str = "/dev/serial/by-id/*Beacon_Beacon_Rev*"
+        matches: List[str] = glob.glob(beacon_pattern)
+        for path in sorted(matches):
+            basename: str = os.path.basename(path)
+            # Extract revision (e.g. "RevH") from paths like usb-Beacon_Beacon_RevH_<serial>-if00
+            rev_match = re.search(r'Beacon_Rev([A-Za-z0-9]+)', basename)
+            revision: str = f"Rev{rev_match.group(1)}" if rev_match else "Unknown"
+            # Extract serial number — typically the segment after the last Rev* part before -if
+            serial_match = re.search(r'Beacon_Rev[A-Za-z0-9]+_([^-]+)', basename)
+            serial: str = serial_match.group(1) if serial_match else ""
+            devices.append({
+                "id": path,
+                "name": f"Beacon {revision}",
+                "revision": revision,
+                "serial": serial,
+                "mode": "service",
+            })
+        return devices
+
+    async def flash_beacon(self, device_id: str, beacon_klipper_path: str, force: bool = False) -> AsyncGenerator[str, None]:
+        """Flashes a Beacon probe using the beacon_klipper update_firmware.py script."""
+        yield f">>> Beacon flash: using repo at {beacon_klipper_path}\n"
+
+        cmd: list = [
+            "python3",
+            os.path.join(beacon_klipper_path, "update_firmware.py"),
+            "update",
+            device_id,
+        ]
+        if force:
+            cmd.append("--force")
+
+        yield f">>> Running: {' '.join(cmd)}\n"
+
+        async for line in self._run_flash_command(cmd):
+            yield line
+
     async def check_device_status(self, device_id: str, method: str, dfu_id: Optional[str] = None, skip_moonraker: bool = False, is_bridge: bool = False, interface: str = "can0", serial_id: Optional[str] = None) -> str:
         """Checks if a device is reachable and its current mode."""
         method = method.lower()
@@ -836,6 +919,8 @@ class FlashManager:
             return "offline"
         elif method == "linux":
             return "service" if os.path.exists("/tmp/klipper_host_mcu") else "ready"
+        elif method == "beacon":
+            return "service" if os.path.exists(device_id) else "offline"
         return "unknown"
 
     async def reboot_device(self, device_id: str, mode: str = "katapult", method: str = "can", interface: str = "can0", is_bridge: bool = False, serial_id: Optional[str] = None) -> AsyncGenerator[str, None]:

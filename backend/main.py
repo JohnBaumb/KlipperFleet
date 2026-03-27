@@ -12,6 +12,8 @@ import subprocess
 import sys
 import re
 import uuid
+import time
+import httpx
 from asyncio.subprocess import Process
 
 logger = logging.getLogger("klipperfleet")
@@ -39,6 +41,7 @@ async def lifespan(application: FastAPI):
     await _migrate_moonraker_conf()
     await _ensure_sudoers()
     await _ensure_system_deps()
+    await flash_mgr.refresh_beacon_path()
     yield
 
 
@@ -95,6 +98,17 @@ kconfig_mgr = KconfigManager(KLIPPER_DIR)
 build_mgr = BuildManager(KLIPPER_DIR, ARTIFACTS_DIR)
 flash_mgr = FlashManager(KLIPPER_DIR, KATAPULT_DIR)
 fleet_mgr = FleetManager(DATA_DIR)
+
+# Beacon remote version cache (3600s TTL: firmware files change very rarely)
+_beacon_remote_version_cache: Optional[str] = None
+_beacon_remote_version_ts: float = 0.0
+_beacon_remote_version_ttl_s: float = 3600.0
+
+def _reset_beacon_cache() -> None:
+    """Reset beacon caches. Used for test isolation."""
+    global _beacon_remote_version_cache, _beacon_remote_version_ts
+    _beacon_remote_version_cache = None
+    _beacon_remote_version_ts = 0.0
 
 
 async def _migrate_moonraker_conf() -> None:
@@ -172,6 +186,63 @@ async def _ensure_system_deps() -> None:
             logger.warning(f"apt-get install failed (rc={proc.returncode}): {stderr.decode().strip()}")
     except Exception:
         logger.debug("System dependency check skipped (non-fatal)", exc_info=True)
+
+
+async def _get_beacon_remote_version(beacon_path: str) -> Optional[str]:
+    """Extracts beacon firmware version from git history of beacon_klipper repo.
+
+    Tries three fallbacks in order:
+    1. Extract semver from latest firmware commit message
+    2. Find closest tag to that commit
+    3. Use short commit hash prefixed with 'git-'
+
+    Returns None if beacon path is invalid or git fails.
+    """
+    try:
+        # Fallback 1: extract semver from latest firmware commit message
+        proc = await asyncio.create_subprocess_exec(
+            "git", "log", "-1", "--format=%s", "--", "firmware/*.dfu",
+            cwd=beacon_path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        msg = stdout.decode().strip()
+        ver_match = re.search(r"(\d+\.\d+\.\d+)", msg)
+        if ver_match:
+            return ver_match.group(1)
+
+        # Fallback 2: closest tag to that commit
+        proc_hash = await asyncio.create_subprocess_exec(
+            "git", "log", "-1", "--format=%H", "--", "firmware/*.dfu",
+            cwd=beacon_path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_h, _ = await asyncio.wait_for(proc_hash.communicate(), timeout=5.0)
+        commit_hash = stdout_h.decode().strip()
+        if commit_hash:
+            proc_tag = await asyncio.create_subprocess_exec(
+                "git", "describe", "--tags", "--abbrev=0", commit_hash,
+                cwd=beacon_path,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_t, _ = await asyncio.wait_for(proc_tag.communicate(), timeout=5.0)
+            tag = stdout_t.decode().strip()
+            if proc_tag.returncode == 0 and tag:
+                return re.sub(r"^v", "", tag)
+
+            # Fallback 3: short hash
+            proc_short = await asyncio.create_subprocess_exec(
+                "git", "log", "-1", "--format=%h", "--", "firmware/*.dfu",
+                cwd=beacon_path,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_s, _ = await asyncio.wait_for(proc_short.communicate(), timeout=5.0)
+            short = stdout_s.decode().strip()
+            if short:
+                return f"git-{short}"
+    except Exception:
+        pass
+    return None
 
 
 # Profile name validation: only alphanumeric, underscores, hyphens, and dots
@@ -308,8 +379,8 @@ class Device(BaseModel):
     name: str
     id: str
     old_id: Optional[str] = None
-    profile: str
-    method: str
+    profile: Optional[str] = None  # None for beacon devices (no build profile)
+    method: str  # "serial", "can", "dfu", "linux", "beacon"
     interface: Optional[str] = "can0"
     baudrate: Optional[int] = 250000  # Serial baudrate for Katapult flashtool.py (common: 115200, 250000, 500000)
     notes: Optional[str] = ""
@@ -324,9 +395,9 @@ class Device(BaseModel):
     exclude_from_batch: bool = False
 
 class FlashRequest(BaseModel):
-    profile: str
+    profile: Optional[str] = None  # None for beacon devices (no build artifact)
     device_id: str
-    method: str # "serial", "can", "dfu", "linux"
+    method: str  # "serial", "can", "dfu", "linux", "beacon"
     dfu_id: Optional[str] = None
     baudrate: Optional[int] = 250000  # Serial baudrate for Katapult
     use_magic_baud: Optional[bool] = False
@@ -1330,7 +1401,11 @@ async def get_fleet(fast: bool = False) -> List[Dict[str, Any]]:
 @app.post("/fleet/device")
 async def save_device(device: Device) -> Dict[str, str]:
     """Registers or updates a device in the fleet."""
-    await fleet_mgr.save_device(device.dict())
+    data = device.dict()
+    # Beacon devices are always excluded from batch operations
+    if data.get("method") == "beacon":
+        data["exclude_from_batch"] = True
+    await fleet_mgr.save_device(data)
     return {"message": "Device saved to fleet"}
 
 @app.post("/fleet/attach")
@@ -1366,7 +1441,9 @@ async def get_fleet_versions() -> Dict[str, Any]:
             "flashed_version": dev.get('flashed_version'),
             "flashed_commit": dev.get('flashed_commit'),
             "last_flashed": dev.get('last_flashed'),
-            "live_version": None
+            "live_version": None,
+            "method": dev.get('method'),
+            "remote_version": None
         }
         
         # Try to find live version by device ID or check all MCU identifiers
@@ -1386,34 +1463,77 @@ async def get_fleet_versions() -> Dict[str, Any]:
                 if mcu_constants.get("MCU") == "linux" or "rpi" in mcu_id.lower() or "host" in mcu_id.lower():
                     dev_info["live_version"] = mcu_info.get("version")
                     break
-        
+
+        # Beacon version: firmware from Klipper MCU query, repo info from update_manager
+        if dev.get('method') == 'beacon':
+            try:
+                async with httpx.AsyncClient() as client:
+                    # 1. Firmware version from Klipper MCU query (only if not already populated)
+                    if dev_info["live_version"] is None:
+                        mcu_resp = await client.get("http://127.0.0.1:7125/printer/objects/query?mcu+beacon", timeout=5.0)
+                        if mcu_resp.status_code == 200:
+                            mcu_beacon = mcu_resp.json().get("result", {}).get("status", {}).get("mcu beacon", {})
+                            fw_version = mcu_beacon.get("mcu_version")
+                            if fw_version:
+                                dev_info["live_version"] = fw_version
+                    # 2. Always determine remote firmware version from beacon_klipper git history (cached)
+                    beacon_path = await flash_mgr.get_beacon_klipper_path()
+                    if beacon_path:
+                        # Check cache before running git subprocesses
+                        global _beacon_remote_version_cache, _beacon_remote_version_ts
+                        now = time.time()
+                        if _beacon_remote_version_cache is not None and (now - _beacon_remote_version_ts) < _beacon_remote_version_ttl_s:
+                            dev_info["remote_version"] = _beacon_remote_version_cache
+                        else:
+                            # Cache miss or stale; fetch from git
+                            remote_ver = await _get_beacon_remote_version(beacon_path)
+                            if remote_ver:
+                                dev_info["remote_version"] = remote_ver
+                                _beacon_remote_version_cache = remote_ver
+                                _beacon_remote_version_ts = now
+                    # 3. Repo (beacon_klipper) version from update_manager (informational only)
+                    um_resp = await client.get("http://127.0.0.1:7125/machine/update/status", timeout=5.0)
+                    if um_resp.status_code == 200:
+                        vi = um_resp.json().get("result", {}).get("version_info", {})
+                        for key, info in vi.items():
+                            if isinstance(info, dict) and "beacon" in key.lower():
+                                dev_info["repo_version"] = info.get("version")
+                                dev_info["repo_remote_version"] = info.get("remote_version")
+                                break
+            except Exception:
+                pass
+
         version_info[device_id] = dev_info
-    
+
     return version_info
 
 @app.get("/devices/discover")
 async def discover_devices() -> Dict[str, List[Dict[str, Any]]]:
-    """Discovers Serial, CAN, DFU, and Linux process devices."""
+    """Discovers Serial, CAN, DFU, Linux process, and Beacon devices."""
     serial_devs: List[Dict[str, Any]] = await flash_mgr.discover_serial_devices()
     can_devs: List[Dict[str, Any]] = await flash_mgr.discover_can_devices(force=True)
     dfu_devs: List[Dict[str, Any]] = await flash_mgr.discover_dfu_devices()
     linux_devs: List[Dict[str, Any]] = flash_mgr.discover_linux_process()
-    
-    # Mark managed devices
+    beacon_devs: List[Dict[str, Any]] = await flash_mgr.discover_beacon_devices()
+
+    # Mark managed devices and enrich with fleet names
     fleet = await fleet_mgr.get_fleet()
-    managed_ids = set()
+    fleet_by_id = {d['id']: d for d in fleet}
+    managed_ids = set(fleet_by_id.keys())
     for d in fleet:
-        managed_ids.add(d['id'])
         if d.get('serial_id'):
             managed_ids.add(d['serial_id'])
         if d.get('dfu_id'):
             managed_ids.add(d['dfu_id'])
-            
-    for category in [serial_devs, can_devs, dfu_devs, linux_devs]:
+
+    for category in [serial_devs, can_devs, dfu_devs, linux_devs, beacon_devs]:
         for dev in category:
             dev['managed'] = dev['id'] in managed_ids
+            # Enrich with fleet name if managed
+            if dev['id'] in fleet_by_id:
+                dev['name'] = fleet_by_id[dev['id']]['name']
 
-    return {"serial": serial_devs, "can": can_devs, "dfu": dfu_devs, "linux": linux_devs}
+    return {"serial": serial_devs, "can": can_devs, "dfu": dfu_devs, "linux": linux_devs, "beacon": beacon_devs}
 
 @app.post("/flash")
 async def flash_device(req: FlashRequest) -> StreamingResponse:
@@ -1430,6 +1550,36 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
     task_id: str = f"task_{uuid.uuid4().hex[:12]}"
     task_store.create_task(task_id)
     task_store.tasks[task_id]["is_bus_task"] = True
+
+    # Beacon devices skip firmware resolution — update_firmware.py handles everything
+    if req.method == "beacon":
+        async def generate_beacon() -> AsyncGenerator[str, None]:
+            services_stopped = False
+            try:
+                beacon_path = await flash_mgr.get_beacon_klipper_path()
+                if not beacon_path:
+                    yield "!!! Error: beacon_klipper not found in Moonraker update_manager. "
+                    yield "Ensure beacon_klipper is configured in moonraker.conf [update_manager].\n"
+                    return
+
+                yield await manage_klipper_services("stop")
+                services_stopped = True
+
+                task_store.update_device_status(task_id, req.device_id, "flashing")
+                async for log in flash_mgr.flash_beacon(req.device_id, beacon_path):
+                    if task_store.is_cancelled(task_id): return
+                    yield log
+
+                task_store.update_device_status(task_id, req.device_id, "ready")
+            except Exception as e:
+                yield f"!!! Error during beacon flash: {str(e)}\n"
+                task_store.update_device_status(task_id, req.device_id, "failed")
+            finally:
+                if services_stopped:
+                    yield await manage_klipper_services("start")
+                task_store.complete_task(task_id)
+
+        return StreamingResponse(generate_beacon(), media_type="text/plain", headers={"X-Task-Id": task_id})
 
     firmware_path: Optional[str] = resolve_firmware_path(req.profile, req.method)
     if firmware_path is None:
