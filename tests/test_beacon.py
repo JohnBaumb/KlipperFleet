@@ -11,6 +11,13 @@ def flash_mgr():
     return FlashManager(klipper_dir="/tmp/klipper", katapult_dir="/tmp/katapult")
 
 
+@pytest.fixture(autouse=True)
+def _reset_beacon_cache():
+    """Reset beacon cache before each test for isolation."""
+    from backend.main import _reset_beacon_cache
+    _reset_beacon_cache()
+
+
 # ---------------------------------------------------------------------------
 # discover_beacon_devices()
 # ---------------------------------------------------------------------------
