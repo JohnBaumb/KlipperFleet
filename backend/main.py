@@ -205,7 +205,7 @@ async def _get_beacon_remote_version(beacon_path: str) -> Optional[str]:
             cwd=beacon_path,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await proc.communicate()
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
         msg = stdout.decode().strip()
         ver_match = re.search(r"(\d+\.\d+\.\d+)", msg)
         if ver_match:
@@ -217,7 +217,7 @@ async def _get_beacon_remote_version(beacon_path: str) -> Optional[str]:
             cwd=beacon_path,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        stdout_h, _ = await proc_hash.communicate()
+        stdout_h, _ = await asyncio.wait_for(proc_hash.communicate(), timeout=5.0)
         commit_hash = stdout_h.decode().strip()
         if commit_hash:
             proc_tag = await asyncio.create_subprocess_exec(
@@ -225,7 +225,7 @@ async def _get_beacon_remote_version(beacon_path: str) -> Optional[str]:
                 cwd=beacon_path,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
-            stdout_t, _ = await proc_tag.communicate()
+            stdout_t, _ = await asyncio.wait_for(proc_tag.communicate(), timeout=5.0)
             tag = stdout_t.decode().strip()
             if proc_tag.returncode == 0 and tag:
                 return re.sub(r"^v", "", tag)
@@ -236,7 +236,7 @@ async def _get_beacon_remote_version(beacon_path: str) -> Optional[str]:
                 cwd=beacon_path,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
-            stdout_s, _ = await proc_short.communicate()
+            stdout_s, _ = await asyncio.wait_for(proc_short.communicate(), timeout=5.0)
             short = stdout_s.decode().strip()
             if short:
                 return f"git-{short}"
@@ -1465,17 +1465,18 @@ async def get_fleet_versions() -> Dict[str, Any]:
                     break
 
         # Beacon version: firmware from Klipper MCU query, repo info from update_manager
-        if dev.get('method') == 'beacon' and dev_info["live_version"] is None:
+        if dev.get('method') == 'beacon':
             try:
                 async with httpx.AsyncClient() as client:
-                    # 1. Firmware version from Klipper MCU query
-                    mcu_resp = await client.get("http://127.0.0.1:7125/printer/objects/query?mcu+beacon", timeout=5.0)
-                    if mcu_resp.status_code == 200:
-                        mcu_beacon = mcu_resp.json().get("result", {}).get("status", {}).get("mcu beacon", {})
-                        fw_version = mcu_beacon.get("mcu_version")
-                        if fw_version:
-                            dev_info["live_version"] = fw_version
-                    # 2. Determine remote firmware version from beacon_klipper git history (cached)
+                    # 1. Firmware version from Klipper MCU query (only if not already populated)
+                    if dev_info["live_version"] is None:
+                        mcu_resp = await client.get("http://127.0.0.1:7125/printer/objects/query?mcu+beacon", timeout=5.0)
+                        if mcu_resp.status_code == 200:
+                            mcu_beacon = mcu_resp.json().get("result", {}).get("status", {}).get("mcu beacon", {})
+                            fw_version = mcu_beacon.get("mcu_version")
+                            if fw_version:
+                                dev_info["live_version"] = fw_version
+                    # 2. Always determine remote firmware version from beacon_klipper git history (cached)
                     beacon_path = await flash_mgr.get_beacon_klipper_path()
                     if beacon_path:
                         # Check cache before running git subprocesses

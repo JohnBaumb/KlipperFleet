@@ -1592,7 +1592,7 @@
                         dfu_id: method === 'dfu' ? dev.id : null,
                         magic_baud_tested: false,
                         use_magic_baud: false,
-                        exclude_from_batch: isBeacon  // beacon uses its own flash path; excluded by default, user can re-enable
+                        exclude_from_batch: isBeacon  // beacon uses update_firmware.py, not batch pipeline; always excluded
                     };
                     try {
                         const res = await fetch('/fleet/device', {
