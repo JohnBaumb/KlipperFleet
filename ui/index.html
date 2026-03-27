@@ -1594,42 +1594,56 @@
                         use_magic_baud: false,
                         exclude_from_batch: isBeacon  // beacon uses update_firmware.py, not batch pipeline; always excluded
                     };
+
+                    // Save original devices state in case we need to restore
+                    const originalDevices = JSON.parse(JSON.stringify(devices.value));
+
+                    // Optimistic UI update: immediately mark device as managed in discovery
+                    if (method === 'beacon' && devices.value.beacon) {
+                        const idx = devices.value.beacon.findIndex(d => d.id === dev.id);
+                        if (idx >= 0) devices.value.beacon[idx].managed = true;
+                    } else if (method === 'serial' && devices.value.serial) {
+                        const idx = devices.value.serial.findIndex(d => d.id === dev.id);
+                        if (idx >= 0) devices.value.serial[idx].managed = true;
+                    } else if (method === 'can' && devices.value.can) {
+                        const idx = devices.value.can.findIndex(d => d.id === dev.id);
+                        if (idx >= 0) devices.value.can[idx].managed = true;
+                    } else if (method === 'dfu' && devices.value.dfu) {
+                        const idx = devices.value.dfu.findIndex(d => d.id === dev.id);
+                        if (idx >= 0) devices.value.dfu[idx].managed = true;
+                    } else if (method === 'linux' && devices.value.linux) {
+                        const idx = devices.value.linux.findIndex(d => d.id === dev.id);
+                        if (idx >= 0) devices.value.linux[idx].managed = true;
+                    }
+
                     try {
-                        // Save original devices state in case we need to restore
-                        const originalDevices = JSON.parse(JSON.stringify(devices.value));
-
-                        const res = await fetch('/fleet/device', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(newDevice)
-                        });
-                        if (!res.ok) throw new Error("Failed to add device");
-
-                        // Optimistic UI update: immediately mark device as managed in discovery
-                        if (method === 'beacon' && devices.value.beacon) {
-                            const idx = devices.value.beacon.findIndex(d => d.id === dev.id);
-                            if (idx >= 0) devices.value.beacon[idx].managed = true;
-                        } else if (method === 'serial' && devices.value.serial) {
-                            const idx = devices.value.serial.findIndex(d => d.id === dev.id);
-                            if (idx >= 0) devices.value.serial[idx].managed = true;
-                        } else if (method === 'can' && devices.value.can) {
-                            const idx = devices.value.can.findIndex(d => d.id === dev.id);
-                            if (idx >= 0) devices.value.can[idx].managed = true;
-                        } else if (method === 'dfu' && devices.value.dfu) {
-                            const idx = devices.value.dfu.findIndex(d => d.id === dev.id);
-                            if (idx >= 0) devices.value.dfu[idx].managed = true;
-                        } else if (method === 'linux' && devices.value.linux) {
-                            const idx = devices.value.linux.findIndex(d => d.id === dev.id);
-                            if (idx >= 0) devices.value.linux[idx].managed = true;
+                        let res;
+                        try {
+                            res = await fetch('/fleet/device', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(newDevice)
+                            });
+                        } catch (fetchError) {
+                            throw new Error("Network error: " + fetchError.message);
                         }
 
-                        // Then fetch authoritative state in background
-                        await fetchFleet();
-                        await discoverDevices();
+                        if (!res.ok) {
+                            let detail = "Failed to add device";
+                            try {
+                                const data = await res.json();
+                                detail = data.detail || detail;
+                            } catch {}
+                            throw new Error(detail);
+                        }
+
+                        // Only refresh on success - this updates with authoritative state
+                        // Run in parallel to avoid double spinner
+                        await Promise.all([fetchFleet(), discoverDevices()]);
                     } catch (e) {
                         // Restore original devices state on error
                         devices.value = originalDevices;
-                        await showAlert("Error", "Failed to add device: " + e.message + ". Please try again.");
+                        await showAlert("Error", "Failed to add device: " + e.message);
                     }
                 };
 
@@ -1708,41 +1722,53 @@
 
                 const removeDeviceFromFleet = async (id) => {
                     if (!await showConfirm("Remove Device", "Remove this device from your fleet?")) return;
-                    try {
-                        // Save original state in case we need to restore
-                        const originalFleet = JSON.parse(JSON.stringify(fleet.value));
-                        const originalDevices = JSON.parse(JSON.stringify(devices.value));
 
-                        // Optimistic UI update: immediately remove from fleet
-                        const idx = fleet.value.findIndex(d => d.id === id);
-                        if (idx >= 0) {
-                            fleet.value.splice(idx, 1);
-                        }
+                    // Save original state in case we need to restore
+                    const originalFleet = JSON.parse(JSON.stringify(fleet.value));
+                    const originalDevices = JSON.parse(JSON.stringify(devices.value));
 
-                        // Optimistically mark as unmanaged in discovered devices (show "+" button again instantly)
-                        ['beacon', 'serial', 'can', 'dfu', 'linux'].forEach(category => {
-                            if (devices.value[category]) {
-                                const devIdx = devices.value[category].findIndex(d => d.id === id);
-                                if (devIdx >= 0) {
-                                    devices.value[category][devIdx].managed = false;
-                                }
+                    // Optimistic UI update: immediately remove from fleet
+                    const idx = fleet.value.findIndex(d => d.id === id);
+                    if (idx >= 0) {
+                        fleet.value.splice(idx, 1);
+                    }
+
+                    // Optimistically mark as unmanaged in discovered devices (show "+" button again instantly)
+                    ['beacon', 'serial', 'can', 'dfu', 'linux'].forEach(category => {
+                        if (devices.value[category]) {
+                            const devIdx = devices.value[category].findIndex(d => d.id === id);
+                            if (devIdx >= 0) {
+                                devices.value[category][devIdx].managed = false;
                             }
-                        });
+                        }
+                    });
 
-                        const res = await fetch(`/fleet/device?device_id=${encodeURIComponent(id)}`, { method: 'DELETE' });
-                        if (!res.ok) {
-                            const data = await res.json();
-                            throw new Error(data.detail || "Failed to remove device");
+                    try {
+                        let res;
+                        try {
+                            res = await fetch(`/fleet/device?device_id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+                        } catch (fetchError) {
+                            // Network error (failed to fetch, timeout, etc)
+                            throw new Error("Network error: " + fetchError.message);
                         }
 
-                        // Refresh in background (non-blocking)
-                        fetchFleet().catch(() => {}); // Silent background refresh
-                        discoverDevices().catch(() => {});
+                        if (!res.ok) {
+                            let detail = "Failed to remove device";
+                            try {
+                                const data = await res.json();
+                                detail = data.detail || detail;
+                            } catch {}
+                            throw new Error(detail);
+                        }
+
+                        // Only refresh on success - this updates with authoritative state
+                        // Run in parallel to avoid double spinner
+                        await Promise.all([fetchFleet(), discoverDevices()]);
                     } catch (e) {
                         // Restore original state on error
                         fleet.value = originalFleet;
                         devices.value = originalDevices;
-                        await showAlert("Error", "Failed to remove device: " + e.message + ". Please try again.");
+                        await showAlert("Error", "Failed to remove device: " + e.message);
                     }
                 };
 
