@@ -1595,10 +1595,13 @@
                         exclude_from_batch: isBeacon  // beacon uses update_firmware.py, not batch pipeline; always excluded
                     };
 
-                    // Save original devices state in case we need to restore
+                    // Save original state in case we need to restore
                     const originalDevices = JSON.parse(JSON.stringify(devices.value));
+                    const originalFleet = JSON.parse(JSON.stringify(fleet.value));
 
-                    // Optimistic UI update: immediately mark device as managed in discovery
+                    // Optimistic UI update: add fleet card immediately and mark device as managed in discovery
+                    fleet.value.push(newDevice);
+
                     if (method === 'beacon' && devices.value.beacon) {
                         const idx = devices.value.beacon.findIndex(d => d.id === dev.id);
                         if (idx >= 0) devices.value.beacon[idx].managed = true;
@@ -1641,8 +1644,9 @@
                         // Run in parallel to avoid double spinner
                         await Promise.all([fetchFleet(), discoverDevices()]);
                     } catch (e) {
-                        // Restore original devices state on error
+                        // Restore original state on error
                         devices.value = originalDevices;
+                        fleet.value = originalFleet;
                         await showAlert("Error", "Failed to add device: " + e.message);
                     }
                 };
