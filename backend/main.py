@@ -1516,11 +1516,11 @@ async def discover_devices() -> Dict[str, List[Dict[str, Any]]]:
     linux_devs: List[Dict[str, Any]] = flash_mgr.discover_linux_process()
     beacon_devs: List[Dict[str, Any]] = await flash_mgr.discover_beacon_devices()
 
-    # Mark managed devices
+    # Mark managed devices and enrich with fleet names
     fleet = await fleet_mgr.get_fleet()
-    managed_ids = set()
+    fleet_by_id = {d['id']: d for d in fleet}
+    managed_ids = set(fleet_by_id.keys())
     for d in fleet:
-        managed_ids.add(d['id'])
         if d.get('serial_id'):
             managed_ids.add(d['serial_id'])
         if d.get('dfu_id'):
@@ -1529,6 +1529,9 @@ async def discover_devices() -> Dict[str, List[Dict[str, Any]]]:
     for category in [serial_devs, can_devs, dfu_devs, linux_devs, beacon_devs]:
         for dev in category:
             dev['managed'] = dev['id'] in managed_ids
+            # Enrich with fleet name if managed
+            if dev['id'] in fleet_by_id:
+                dev['name'] = fleet_by_id[dev['id']]['name']
 
     return {"serial": serial_devs, "can": can_devs, "dfu": dfu_devs, "linux": linux_devs, "beacon": beacon_devs}
 

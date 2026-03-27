@@ -758,7 +758,7 @@
                 const profiles = ref([]);
                 const fleet = ref([]);
                 const services = ref([]);
-                const devices = ref({ serial: [], can: [], dfu: [], linux: [] });
+                const devices = ref({ serial: [], can: [], dfu: [], linux: [], beacon: [] });
                 const deviceVersions = ref({});
                 const systemKlipperVersion = ref(null);
                 const firmwareName = ref('Klipper');
@@ -992,10 +992,10 @@
                         // Then, get the full status (this may be slow due to CAN discovery)
                         const res = await fetch('/fleet');
                         fleet.value = await res.json();
-                        
+
                         // Fetch version info for devices
                         await fetchVersions();
-                        
+
                         // Reconcile profile-driven flags (CAN bridge, Linux)
                         reconcileProfileFlags();
                     } catch (e) {
@@ -1601,7 +1601,28 @@
                             body: JSON.stringify(newDevice)
                         });
                         if (!res.ok) throw new Error("Failed to add device");
+
+                        // Optimistic UI update: immediately mark device as managed in discovery
+                        if (method === 'beacon' && devices.value.beacon) {
+                            const idx = devices.value.beacon.findIndex(d => d.id === dev.id);
+                            if (idx >= 0) devices.value.beacon[idx].managed = true;
+                        } else if (method === 'serial' && devices.value.serial) {
+                            const idx = devices.value.serial.findIndex(d => d.id === dev.id);
+                            if (idx >= 0) devices.value.serial[idx].managed = true;
+                        } else if (method === 'can' && devices.value.can) {
+                            const idx = devices.value.can.findIndex(d => d.id === dev.id);
+                            if (idx >= 0) devices.value.can[idx].managed = true;
+                        } else if (method === 'dfu' && devices.value.dfu) {
+                            const idx = devices.value.dfu.findIndex(d => d.id === dev.id);
+                            if (idx >= 0) devices.value.dfu[idx].managed = true;
+                        } else if (method === 'linux' && devices.value.linux) {
+                            const idx = devices.value.linux.findIndex(d => d.id === dev.id);
+                            if (idx >= 0) devices.value.linux[idx].managed = true;
+                        }
+
+                        // Then fetch authoritative state in background
                         await fetchFleet();
+                        await discoverDevices();
                     } catch (e) {
                         await showAlert("Error", "Error: " + e.message);
                     }
@@ -1663,7 +1684,7 @@
                         }
                     } catch (e) {
                         await showAlert("Error", "Error: " + e.message);
-                        fetchFleet(); // Revert on error
+                        await fetchFleet(); // Revert on error
                     }
                 };
 
@@ -1683,13 +1704,39 @@
                 const removeDeviceFromFleet = async (id) => {
                     if (!await showConfirm("Remove Device", "Remove this device from your fleet?")) return;
                     try {
+                        // Optimistic UI update: immediately remove from fleet
+                        const idx = fleet.value.findIndex(d => d.id === id);
+                        if (idx >= 0) {
+                            fleet.value.splice(idx, 1);
+                        }
+
+                        // Optimistically mark as unmanaged in discovered devices (show "+" button again instantly)
+                        ['beacon', 'serial', 'can', 'dfu', 'linux'].forEach(category => {
+                            if (devices.value[category]) {
+                                const devIdx = devices.value[category].findIndex(d => d.id === id);
+                                if (devIdx >= 0) {
+                                    devices.value[category][devIdx].managed = false;
+                                }
+                            }
+                        });
+
                         const res = await fetch(`/fleet/device?device_id=${encodeURIComponent(id)}`, { method: 'DELETE' });
                         if (!res.ok) {
                             const data = await res.json();
                             throw new Error(data.detail || "Failed to remove device");
                         }
-                        fetchFleet();
+
+                        // Refresh in background (non-blocking)
+                        const removedId = id;
+                        fetchFleet().catch(() => {}); // Silent background refresh
+                        // Optionally refresh discovered devices, but don't await
+                        discoverDevices().catch(() => {});
                     } catch (e) {
+                        // Re-add the device if removal failed
+                        const idx = fleet.value.findIndex(d => d.id === id);
+                        if (idx < 0) {
+                            await fetchFleet(); // Restore from server
+                        }
                         await showAlert("Error", "Error: " + e.message);
                     }
                 };
