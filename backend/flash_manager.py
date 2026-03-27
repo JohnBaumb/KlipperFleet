@@ -28,21 +28,8 @@ class FlashManager:
         self._can_cache_time: Dict[str, float] = {}
         self._can_cache_ttl_s: float = 2.0 # Short TTL to keep status feeling "live"
 
-    @staticmethod
-    def _is_beacon_device(dev_path: str) -> bool:
-        """Return True if *dev_path* (or the symlink it resolves to) is a Beacon probe.
-
-        Beacon devices are managed through the dedicated beacon flash flow and
-        must never appear in the generic serial discovery results.
-        """
-        if "beacon" in dev_path.lower():
-            return True
-        try:
-            if os.path.islink(dev_path) and "beacon" in os.path.realpath(dev_path).lower():
-                return True
-        except OSError:
-            pass
-        return False
+        # Beacon path cache: resolved once at startup, refreshable on demand
+        self._beacon_klipper_path: Optional[str] = None
 
     async def discover_serial_devices(self, skip_moonraker: bool = False) -> List[Dict[str, str]]:
         """Lists all serial devices in /dev/serial/by-id/ and common UART ports."""
@@ -759,8 +746,8 @@ class FlashManager:
         
         return device_id
 
-    async def get_beacon_klipper_path(self) -> Optional[str]:
-        """Discovers beacon_klipper repo path via Moonraker's /server/config API."""
+    async def refresh_beacon_path(self) -> Optional[str]:
+        """Refreshes the beacon_klipper path by querying Moonraker's /server/config API."""
         try:
             async with httpx.AsyncClient() as client:
                 response: httpx.Response = await client.get(
@@ -777,10 +764,17 @@ class FlashManager:
                         continue
                     raw_path: Optional[str] = section.get("path")
                     if raw_path:
-                        return os.path.expanduser(raw_path)
+                        self._beacon_klipper_path = os.path.expanduser(raw_path)
+                        return self._beacon_klipper_path
         except Exception as e:
             logger.warning("Failed to query Moonraker for beacon_klipper path: %s", e)
         return None
+
+    async def get_beacon_klipper_path(self) -> Optional[str]:
+        """Returns cached beacon_klipper path, or refreshes it if not yet cached."""
+        if self._beacon_klipper_path is not None:
+            return self._beacon_klipper_path
+        return await self.refresh_beacon_path()
 
     async def discover_beacon_devices(self) -> List[Dict[str, str]]:
         """Discovers Beacon probes by scanning /dev/serial/by-id/ for Beacon device paths."""
