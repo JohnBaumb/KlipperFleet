@@ -1024,6 +1024,8 @@
                     }
                 };
 
+                const stripGitSuffix = (v) => v ? v.replace(/-\d+-g[0-9a-f]+(-dirty)?$/, '') : v;
+
                 const versionMatch = (deviceId) => {
                     const info = deviceVersions.value[deviceId];
                     if (!info || !info.live_version) return true;
@@ -1034,7 +1036,7 @@
                     }
                     const host = systemKlipperVersion.value;
                     if (!host || !host.version || host.version === 'unknown') return true;
-                    return info.live_version === host.version;
+                    return stripGitSuffix(info.live_version) === stripGitSuffix(host.version);
                 };
 
                 const versionColor = (deviceId) => {
@@ -1585,12 +1587,12 @@
                         interface: dev.interface || 'can0',
                         baudrate: 250000,  // Default baudrate for serial (Katapult default)
                         notes: '',
-                        is_katapult: !isBeacon && (dev.id.toLowerCase().includes('katapult') || dev.id.toLowerCase().includes('canboot')),
+                        is_katapult: dev.id.toLowerCase().includes('katapult') || dev.id.toLowerCase().includes('canboot'),
                         is_bridge: false,
                         dfu_id: method === 'dfu' ? dev.id : null,
                         magic_baud_tested: false,
                         use_magic_baud: false,
-                        exclude_from_batch: isBeacon
+                        exclude_from_batch: isBeacon  // beacon uses its own flash path; excluded by default, user can re-enable
                     };
                     try {
                         const res = await fetch('/fleet/device', {
