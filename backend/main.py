@@ -322,6 +322,7 @@ class Device(BaseModel):
     dfu_exit_tested: bool = False
     use_dfu_exit: bool = False
     exclude_from_batch: bool = False
+    custom_make_command: Optional[str] = None
 
 class FlashRequest(BaseModel):
     profile: str
@@ -739,22 +740,28 @@ async def batch_operation(action: str, background_tasks: BackgroundTasks) -> Dic
             if "build" in action:
                 if task_store.is_cancelled(task_id): return
                 task_store.add_log(task_id, ">>> STARTING BATCH BUILD PHASE <<<\n")
-                profiles_to_build: List[Any] = list(set(d['profile'] for d in devices if d['profile']))
-                if not profiles_to_build:
+                # Deduplicate by (profile, custom_make_command) to handle devices with custom build steps
+                builds_needed: Dict[tuple, Optional[str]] = {}
+                for d in devices:
+                    if d.get('profile'):
+                        key = (d['profile'], d.get('custom_make_command') or None)
+                        builds_needed[key] = key[1]
+                if not builds_needed:
                     task_store.add_log(task_id, ">>> No profiles assigned to fleet devices. Skipping build.\n")
                 else:
-                    for profile in profiles_to_build:
+                    for (profile, custom_cmd), _ in builds_needed.items():
                         if task_store.is_cancelled(task_id): return
-                        task_store.add_log(task_id, f"\n>>> BATCH BUILD: Starting {profile}...\n")
+                        label = f"{profile} (custom: {custom_cmd})" if custom_cmd else profile
+                        task_store.add_log(task_id, f"\n>>> BATCH BUILD: Starting {label}...\n")
                         config_path: str = os.path.join(PROFILES_DIR, f"{profile}.config")
                         build_success = True
-                        async for log in build_mgr.run_build(config_path):
+                        async for log in build_mgr.run_build(config_path, custom_make_command=custom_cmd):
                             if task_store.is_cancelled(task_id): return
                             task_store.add_log(task_id, log)
                             if "!!! Error" in log or "Build failed" in log:
                                 build_success = False
                         build_results[profile] = "SUCCESS" if build_success else "FAILED"
-                        task_store.add_log(task_id, f">>> BATCH BUILD: Finished {profile}\n")
+                        task_store.add_log(task_id, f">>> BATCH BUILD: Finished {label}\n")
             
             # 2. Flash phase
             if "flash" in action:

@@ -498,6 +498,12 @@
                                                   class="w-full mainsail-input text-[10px] p-2 rounded h-16 resize-none focus:outline-none focus:border-blue-500 text-gray-200"
                                         ></textarea>
                                     </div>
+                                    <div class="mt-2">
+                                        <input v-model="dev.custom_make_command" @change="updateFleetDevice(dev)"
+                                               class="w-full mainsail-input text-[10px] p-2 rounded bg-gray-900 border-gray-700 text-gray-400 font-mono focus:outline-none focus:border-blue-500"
+                                               placeholder="Custom make command (e.g. ./make_with_bdsensor.sh)"
+                                               title="If set, this command replaces 'make -jN' during builds for this device. Runs from ~/klipper/">
+                                    </div>
                                 </div>
 
                                 <!-- Attached DFU Device (Sibling Entry) -->
@@ -1531,7 +1537,8 @@
                         dfu_id: method === 'dfu' ? dev.id : null,
                         magic_baud_tested: false,
                         use_magic_baud: false,
-                        exclude_from_batch: false
+                        exclude_from_batch: false,
+                        custom_make_command: null
                     };
                     try {
                         const res = await fetch('/fleet/device', {
