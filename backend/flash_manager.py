@@ -755,7 +755,14 @@ class FlashManager:
         """Returns the local Linux process MCU if it exists or as a target."""
         # Klipper's host MCU usually uses /tmp/klipper_host_mcu
         # We'll return it as a discoverable 'device'
-        return [{'id': 'linux_process', 'name': 'Linux Process (Host MCU)'}]
+        return [
+            {
+                'id': 'linux_process',
+                'name': 'Linux Process (Host MCU)',
+                'mode': 'service',
+                'application': 'Klipper (Linux)',
+            }
+        ]
 
     async def is_interface_up(self, interface: str = 'can0') -> bool:
         """Checks if a network interface is UP and has a carrier."""
