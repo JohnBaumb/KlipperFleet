@@ -999,6 +999,8 @@ class FlashManager:
                     'revision': revision,
                     'serial': serial,
                     'mode': 'service',
+                    'interface': 'usb',
+                    'application': 'Beacon',
                 }
             )
         return devices
