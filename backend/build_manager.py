@@ -74,7 +74,7 @@ class BuildManager:
         """Returns the build info for the last successful build of a profile."""
         return self._last_build_info.get(profile)
 
-    async def run_build(self, config_path: str) -> AsyncGenerator[str, None]:
+    async def run_build(self, config_path: str, custom_make_command: Optional[str] = None) -> AsyncGenerator[str, None]:
         """Runs the Klipper build process and yields output line by line."""
         profile_name: str = os.path.basename(config_path).replace(".config", "")
         
@@ -104,14 +104,23 @@ class BuildManager:
             return
 
         # 3. Build (use all available CPU cores for faster compilation)
-        nproc = os.cpu_count() or 1
-        yield f">>> Starting build (-j{nproc})...\n"
-        process: Process = await asyncio.create_subprocess_exec(
-            "make", f"-j{nproc}",
-            cwd=self.klipper_dir,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT
-        )
+        if custom_make_command:
+            yield f">>> Starting build (custom: {custom_make_command})...\n"
+            process: Process = await asyncio.create_subprocess_exec(
+                "bash", "-c", custom_make_command,
+                cwd=self.klipper_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT
+            )
+        else:
+            nproc = os.cpu_count() or 1
+            yield f">>> Starting build (-j{nproc})...\n"
+            process: Process = await asyncio.create_subprocess_exec(
+                "make", f"-j{nproc}",
+                cwd=self.klipper_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT
+            )
 
         assert process.stdout is not None
         build_timeout_s = 600  # 10 minutes total
