@@ -613,7 +613,7 @@ async def rename_profile(name: str, body: ProfileRename) -> Dict[str, str]:
     return {"message": f"Profile renamed from '{name}' to '{body.new_name}'"}
 
 @app.get("/build/{profile}")
-async def build_profile(profile: str) -> StreamingResponse:
+async def build_profile(profile: str, custom_make_command: Optional[str] = None) -> StreamingResponse:
     """Starts a build for the specified profile and streams the output."""
     validate_profile_name(profile)
     task_id: str = f"task_{uuid.uuid4().hex[:12]}"
@@ -624,7 +624,7 @@ async def build_profile(profile: str) -> StreamingResponse:
         raise HTTPException(status_code=404, detail=f"Profile '{profile}' not found")
     
     async def generate() -> AsyncGenerator[str, None]:
-        async for log in build_mgr.run_build(config_path):
+        async for log in build_mgr.run_build(config_path, custom_make_command=custom_make_command):
             if task_store.is_cancelled(task_id): break
             yield log
         task_store.complete_task(task_id)

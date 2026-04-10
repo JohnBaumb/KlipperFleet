@@ -1222,7 +1222,7 @@
                     }
                 };
 
-                const startBuild = async (profileName = null) => {
+                const startBuild = async (profileName = null, customMakeCommand = null) => {
                     const target = profileName || selectedProfile.value;
                     if (!target) return;
                     
@@ -1236,7 +1236,9 @@
                     buildLogs.value += `>>> Starting build for ${target}...\n`;
                     
                     try {
-                        const response = await fetch(`/build/${target}`);
+                        let url = `/build/${target}`;
+                        if (customMakeCommand) url += `?custom_make_command=${encodeURIComponent(customMakeCommand)}`;
+                        const response = await fetch(url);
                         currentTaskId.value = response.headers.get('X-Task-Id');
 
                         const reader = response.body.getReader();
@@ -1429,7 +1431,7 @@
                         return;
                     }
                     view.value = 'dashboard';
-                    await startBuild(dev.profile);
+                    await startBuild(dev.profile, dev.custom_make_command);
                     if (taskCancelled.value) return;
                     await startFlash(dev.profile, dev.id, dev.method, dev.dfu_id);
                 };
@@ -1440,7 +1442,7 @@
                         return;
                     }
                     view.value = 'dashboard';
-                    await startBuild(dev.profile);
+                    await startBuild(dev.profile, dev.custom_make_command);
                 };
 
                 const quickFlashOnly = async (dev) => {
