@@ -14,11 +14,6 @@ out/
 *.hex
 *.uf2
 Example/
-roadmap.md
-agents.md
-bugs.md
 .mailmap
 tests/
-scripts/
 .github/
-private-notes/
