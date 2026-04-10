@@ -420,11 +420,14 @@
                             <div v-if="devices.linux && devices.linux.length > 0">
                                 <h4 class="text-xs font-bold text-gray-400 mb-2 uppercase tracking-wider">Linux Process</h4>
                                 <div v-for="dev in devices.linux" :key="dev.id" class="flex items-center justify-between p-3 bg-gray-800 rounded mb-2">
-                                    <div class="flex items-center">
+                                    <div class="overflow-hidden flex items-center">
                                         <i v-if="dev.managed" class="fas fa-check-circle text-green-500 mr-3 flex-none" title="Managed in Fleet"></i>
-                                        <div>
-                                            <p class="text-sm font-bold text-gray-100">{{ dev.name }}</p>
-                                            <p class="text-[10px] text-gray-400 font-mono">{{ dev.id }}</p>
+                                        <div class="overflow-hidden">
+                                            <div class="flex items-center space-x-2">
+                                                <p class="text-sm font-bold text-gray-100 truncate">{{ dev.name }}</p>
+                                                <span class="text-[8px] font-bold uppercase" :class="statusColor(dev.mode)">{{ formatStatus(dev.mode) }}</span>
+                                            </div>
+                                            <p class="text-[10px] text-gray-400 font-mono truncate">{{ dev.id }}</p>
                                         </div>
                                     </div>
                                     <button v-if="!dev.managed" @click="addDeviceToFleet(dev, 'linux')" class="text-blue-400 hover:text-blue-300 text-sm">
@@ -441,6 +444,8 @@
                                         <div class="overflow-hidden">
                                             <div class="flex items-center space-x-2">
                                                 <p class="text-sm font-bold truncate text-gray-100">{{ dev.name }}</p>
+                                                <span class="text-[8px] font-bold uppercase" :class="statusColor(dev.mode)">{{ formatStatus(dev.mode) }}</span>
+                                                <span v-if="dev.interface" class="text-[8px] font-bold uppercase text-purple-400 bg-purple-900/30 px-1.5 py-0.5 rounded">{{ dev.interface }}</span>
                                                 <span class="text-[8px] bg-teal-900 text-teal-200 px-1 rounded font-bold uppercase">{{ dev.revision }}</span>
                                             </div>
                                             <p class="text-[10px] text-gray-400 font-mono truncate">{{ dev.id }}</p>
