@@ -1602,22 +1602,12 @@
                     // Optimistic UI update: add fleet card immediately and mark device as managed in discovery
                     fleet.value.push(newDevice);
 
-                    if (method === 'beacon' && devices.value.beacon) {
-                        const idx = devices.value.beacon.findIndex(d => d.id === dev.id);
-                        if (idx >= 0) devices.value.beacon[idx].managed = true;
-                    } else if (method === 'serial' && devices.value.serial) {
-                        const idx = devices.value.serial.findIndex(d => d.id === dev.id);
-                        if (idx >= 0) devices.value.serial[idx].managed = true;
-                    } else if (method === 'can' && devices.value.can) {
-                        const idx = devices.value.can.findIndex(d => d.id === dev.id);
-                        if (idx >= 0) devices.value.can[idx].managed = true;
-                    } else if (method === 'dfu' && devices.value.dfu) {
-                        const idx = devices.value.dfu.findIndex(d => d.id === dev.id);
-                        if (idx >= 0) devices.value.dfu[idx].managed = true;
-                    } else if (method === 'linux' && devices.value.linux) {
-                        const idx = devices.value.linux.findIndex(d => d.id === dev.id);
-                        if (idx >= 0) devices.value.linux[idx].managed = true;
-                    }
+                    ['beacon', 'serial', 'can', 'dfu', 'linux'].forEach(category => {
+                        if (devices.value[category]) {
+                            const idx = devices.value[category].findIndex(d => d.id === dev.id);
+                            if (idx >= 0) devices.value[category][idx].managed = true;
+                        }
+                    });
 
                     try {
                         let res;
