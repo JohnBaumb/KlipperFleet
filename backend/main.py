@@ -4,6 +4,7 @@ from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, AsyncGenerator
+from urllib.parse import urlparse
 import os
 import asyncio
 import json
@@ -649,6 +650,33 @@ async def get_health() -> Dict[str, Any]:
 async def get_print_status() -> Dict[str, Any]:
     """Returns whether any printer is currently printing (via Moonraker)."""
     return await flash_mgr.check_printer_printing()
+
+@app.get("/api/printer-ui")
+async def get_printer_ui(request: Request) -> Dict[str, str]:
+    """Returns the detected printer UI name by server-side fetch of manifest from referrer URL."""
+    # Extract port from referrer header
+    referrer = request.headers.get("referer", "")
+    port = 80
+    if referrer:
+        try:
+            parsed = urlparse(referrer)
+            port = parsed.port or 80
+        except Exception:
+            pass
+
+    # Try fetching manifest files from the referrer's port
+    for manifest_path in ["/manifest.webmanifest", "/manifest.json"]:
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                response = await client.get(f"http://localhost:{port}{manifest_path}")
+                if response.status_code == 200:
+                    manifest = response.json()
+                    ui_name = manifest.get("name", "").lower()
+                    if ui_name in ["mainsail", "fluidd", "octoprint"]:
+                        return {"uiName": ui_name.capitalize()}
+        except Exception:
+            pass
+    return {"uiName": "Printer UI"}
 
 
 @app.get('/klipper/version')
