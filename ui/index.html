@@ -1861,7 +1861,7 @@
                             printerUrl.value = document.referrer;
                             hasReferrer.value = true;
                             // Fetch printer UI name from KlipperFleet API (no CORS issues)
-                            fetch('/api/printer-ui')
+                            fetch('/api/printer-ui?port=' + (referrerUrl.port || '80'))
                                 .then(r => r.json())
                                 .then(data => {
                                     if (data.uiName) {

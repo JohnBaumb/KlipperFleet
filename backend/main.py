@@ -652,17 +652,10 @@ async def get_print_status() -> Dict[str, Any]:
     return await flash_mgr.check_printer_printing()
 
 @app.get("/api/printer-ui")
-async def get_printer_ui(request: Request) -> Dict[str, str]:
-    """Returns the detected printer UI name by server-side fetch of manifest from referrer URL."""
-    # Extract port from referrer header
-    referrer = request.headers.get("referer", "")
-    port = 80
-    if referrer:
-        try:
-            parsed = urlparse(referrer)
-            port = parsed.port or 80
-        except Exception:
-            pass
+async def get_printer_ui(port: int = 80) -> Dict[str, str]:
+    """Returns the detected printer UI name by server-side fetch of manifest from localhost."""
+    if not (1 <= port <= 65535):
+        return {"uiName": "Printer UI"}
 
     # Try fetching manifest files from the referrer's port
     for manifest_path in ["/manifest.webmanifest", "/manifest.json"]:
