@@ -83,8 +83,8 @@
                     <button @click="sidebarOpen = !sidebarOpen" class="md:hidden text-gray-400 hover:text-white p-1">
                         <i class="fas fa-bars text-lg"></i>
                     </button>
-                    <a :href="mainsailUrl" class="hidden md:flex text-gray-400 hover:text-white items-center text-sm transition-colors mr-4 border-r border-gray-800 pr-4">
-                        <i class="fas fa-arrow-left mr-2"></i> Return to Mainsail
+                    <a v-if="hasReferrer" :href="printerUrl" class="hidden md:flex text-gray-400 hover:text-white items-center text-sm transition-colors mr-4 border-r border-gray-800 pr-4">
+                        <i class="fas fa-arrow-left mr-2"></i> Return to {{ printerTitle }}
                     </a>
                     <h2 class="text-lg md:text-xl font-semibold capitalize">{{ view }}</h2>
                     <span v-if="building || flashing" class="flex items-center text-orange-400 text-xs md:text-sm ml-auto md:ml-0">
@@ -849,7 +849,9 @@
                 const expandLogs = ref(localStorage.getItem('kf_expand_logs') === 'true');
                 const expandLogsHeight = ref(localStorage.getItem('kf_expand_logs_height') || '800px');
                 const error = ref(null);
-                const mainsailUrl = window.location.protocol + '//' + window.location.hostname;
+                const printerUrl = ref('');
+                const printerTitle = ref('Printer');
+                const hasReferrer = ref(false);
                 const showRawSymbolNames = ref(localStorage.getItem('kf_show_raw_symbols') === 'true');
                 const showOptionalFeatures = ref(localStorage.getItem('kf_show_optional') === 'true');
                 const isKlipperKconfiglib = ref(true);
@@ -1852,6 +1854,29 @@
                 };
 
                 onMounted(() => {
+                    // Resolve return-link from document.referrer (client-side only)
+                    if (document.referrer) {
+                        try {
+                            const referrerUrl = new URL(document.referrer);
+                            printerUrl.value = document.referrer;
+                            hasReferrer.value = true;
+                            // Fetch printer UI name from KlipperFleet API (no CORS issues)
+                            fetch('/api/printer-ui?port=' + (referrerUrl.port || '80'))
+                                .then(r => r.json())
+                                .then(data => {
+                                    if (data.uiName) {
+                                        printerTitle.value = data.uiName;
+                                    }
+                                })
+                                .catch(() => {
+                                    // Fallback to default if API call fails
+                                });
+                        } catch {
+                            // Invalid referrer URL — hide link
+                            hasReferrer.value = false;
+                        }
+                    }
+
                     fetchProfiles().then(() => {
                         if (selectedProfile.value && !profiles.value.includes(selectedProfile.value)) {
                             selectedProfile.value = '';
@@ -1932,7 +1957,7 @@
                     buildLogs, formattedLogs, expandLogs, expandLogsHeight, updateValue, saveProfile, saveProfileAs, newProfile, deleteProfile, renameProfile, loadProfile, createMissingProfile, startBuild, runBatch, selfUpdate,
                     devices, selectedDevice, discoverDevices, startFlash, quickFlash, quickBuild, quickFlashOnly, flashBeacon, beaconUpToDate, buildAndDownload, rebootDevice, statusColor, formatStatus,
                     addDeviceToFleet, attachToFleet, updateFleetDevice, onDeviceProfileChange, removeDeviceFromFleet, error, modifiedValues, formatNotes,
-                    mainsailUrl, profileInfo, isProfileCanBridge, isProfileLinux,
+                    printerUrl, printerTitle, hasReferrer, profileInfo, isProfileCanBridge, isProfileLinux,
                     modal, showAlert, showConfirm, showPrompt, closeModal, testMagicBaud,
                     services, manageServices, cancelTask, currentTaskId,
                     showRawSymbolNames, showOptionalFeatures, isKlipperKconfiglib, firmwareName,
