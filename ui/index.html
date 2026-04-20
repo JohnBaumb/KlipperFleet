@@ -1037,8 +1037,6 @@
                     }
                 };
 
-                const stripGitSuffix = (v) => v ? v.replace(/-\d+-g[0-9a-f]+(-dirty)?$/, '') : v;
-
                 const versionMatch = (deviceId) => {
                     const info = deviceVersions.value[deviceId];
                     if (!info || !info.live_version) return true;
@@ -1049,7 +1047,7 @@
                     }
                     const host = systemKlipperVersion.value;
                     if (!host || !host.version || host.version === 'unknown') return true;
-                    return stripGitSuffix(info.live_version) === stripGitSuffix(host.version);
+                    return info.live_version === host.version;
                 };
 
                 const versionColor = (deviceId) => {
