@@ -1072,8 +1072,13 @@
                         if (info?.repo_version) parts.push(`Klipper plugin: ${info.repo_version}`);
                     } else {
                         const host = systemKlipperVersion.value;
-                        if (info?.live_version) parts.push(`Device: ${info.live_version}`);
-                        if (host?.version) parts.push(`System: ${host.version}`);
+                        if (info?.live_version) {
+                            parts.push(`Device: ${info.live_version}`);
+                            if (host?.version) parts.push(`System: ${host.version}`);
+                        } else if (info?.flashed_version) {
+                            parts.push(`Last flashed: ${info.flashed_version}`);
+                            parts.push('Not configured as an MCU in Klipper');
+                        }
                     }
                     if (info?.last_flashed) parts.push(`Flashed: ${info.last_flashed}`);
                     return parts.join(' | ');
