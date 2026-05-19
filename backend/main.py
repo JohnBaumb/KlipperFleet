@@ -2827,6 +2827,117 @@ async def update_check() -> Dict[str, Any]:
         }
 
 
+@app.get('/api/backup/export')
+async def backup_export():
+    """Export a backup archive containing fleet.json and all profiles."""
+    import zipfile
+    import io
+    from datetime import datetime
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        # Metadata
+        meta = {
+            'version': app.version,
+            'created_at': datetime.utcnow().isoformat() + 'Z',
+            'format': 1,
+        }
+        zf.writestr('backup_meta.json', json.dumps(meta, indent=2))
+
+        # Fleet registry
+        fleet_path = os.path.join(DATA_DIR, 'fleet.json')
+        if os.path.exists(fleet_path):
+            zf.write(fleet_path, 'fleet.json')
+
+        # Profiles
+        profiles_dir = os.path.join(DATA_DIR, 'profiles')
+        if os.path.isdir(profiles_dir):
+            for fname in os.listdir(profiles_dir):
+                fpath = os.path.join(profiles_dir, fname)
+                if os.path.isfile(fpath):
+                    zf.write(fpath, f'profiles/{fname}')
+
+    buf.seek(0)
+    timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+    filename = f'klipperfleet_backup_{timestamp}.zip'
+    return StreamingResponse(
+        buf,
+        media_type='application/zip',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post('/api/backup/import')
+async def backup_import(request: Request):
+    """Import a backup archive, restoring fleet.json and profiles."""
+    import zipfile
+    import io
+
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail='No file uploaded')
+
+    try:
+        buf = io.BytesIO(body)
+        with zipfile.ZipFile(buf, 'r') as zf:
+            names = zf.namelist()
+
+            # Validate it's a KlipperFleet backup
+            if 'backup_meta.json' not in names:
+                raise HTTPException(
+                    status_code=400,
+                    detail='Invalid backup file: missing backup_meta.json',
+                )
+
+            meta = json.loads(zf.read('backup_meta.json'))
+            restored = {'fleet': False, 'profiles': []}
+
+            # Restore fleet.json
+            if 'fleet.json' in names:
+                fleet_data = zf.read('fleet.json')
+                # Validate JSON
+                json.loads(fleet_data)
+                fleet_path = os.path.join(DATA_DIR, 'fleet.json')
+                with open(fleet_path, 'wb') as f:
+                    f.write(fleet_data)
+                restored['fleet'] = True
+
+            # Restore profiles
+            profiles_dir = os.path.join(DATA_DIR, 'profiles')
+            os.makedirs(profiles_dir, exist_ok=True)
+            for name in names:
+                if name.startswith('profiles/') and not name.endswith('/'):
+                    fname = os.path.basename(name)
+                    if not fname:
+                        continue
+                    # Security: reject path traversal
+                    if '..' in fname or '/' in fname:
+                        continue
+                    dest = os.path.join(profiles_dir, fname)
+                    with open(dest, 'wb') as f:
+                        f.write(zf.read(name))
+                    restored['profiles'].append(fname)
+
+            return {
+                'status': 'ok',
+                'message': 'Backup restored successfully',
+                'backup_version': meta.get('version', 'unknown'),
+                'backup_date': meta.get('created_at', 'unknown'),
+                'restored_fleet': restored['fleet'],
+                'restored_profiles': restored['profiles'],
+            }
+
+    except zipfile.BadZipFile:
+        raise HTTPException(
+            status_code=400, detail='Invalid file: not a valid ZIP archive'
+        )
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=400,
+            detail='Invalid backup: fleet.json is not valid JSON',
+        )
+
+
 REPO_UI_DIR: str = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), 'ui'
 )
