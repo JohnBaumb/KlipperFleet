@@ -17,6 +17,7 @@ KlipperFleet is a web interface (integrated into Mainsail) for configuring, buil
 - **Auto Reboot**: Detects Klipper vs. Katapult/DFU mode and reboots devices into the correct bootloader automatically.
 - **Service Management**: Stops/starts Klipper and Moonraker services during flash operations.
 - **Integrated Flashing**: Flash via Serial, CAN, or DFU from the browser with real-time log streaming.
+- **Backup & Restore**: Export your fleet registry and profiles as a ZIP, or import a previous backup to restore after a fresh install.
 - **Mainsail Integration**: Native look and feel within the Mainsail ecosystem.
 
 ## Tested Hardware
@@ -49,6 +50,9 @@ KlipperFleet is a web interface (integrated into Mainsail) for configuring, buil
 
 ### Fleet Manager
 ![Fleet Manager](images/fleet_manager.png)
+
+### Backup & Restore
+![Backup & Restore](images/backup_restore.png)
 
 ## Prerequisites
 
@@ -140,6 +144,18 @@ The installer auto-configures `.theme/navi.json`. If the entry is missing, add i
 ### Data Directory
 
 Stored in `~/printer_data/config/klipperfleet/`: `profiles/` (Kconfig files), `artifacts/` (compiled firmware), `fleet.json` (device registry).
+
+## Backup & Restore
+
+KlipperFleet includes a built-in backup system accessible from the sidebar. Use it to export your fleet registry and all Kconfig profiles as a timestamped ZIP archive, or import a previous backup to restore after a fresh install.
+
+- **Export**: Downloads a ZIP containing `fleet.json`, all profiles, and metadata (version + date).
+- **Import**: Upload a previously exported ZIP to restore your fleet and profiles in one click.
+
+After restoring on a new system, rebuild firmware from the Dashboard to regenerate binary artifacts.
+
+> [!NOTE]
+> CAN UUIDs are hardware-specific and carry over automatically. Serial paths (`/dev/serial/by-id/...`) are stable across OS reinstalls as long as the same USB ports and boards are used. If you change USB ports, update the serial paths in the Fleet Manager.
 
 ## Roadmap
 
