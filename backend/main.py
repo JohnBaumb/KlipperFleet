@@ -43,6 +43,7 @@ async def lifespan(application: FastAPI):
     await _migrate_moonraker_conf()
     await _ensure_sudoers()
     await _ensure_system_deps()
+    await _ensure_vendor_assets()
     await flash_mgr.refresh_beacon_path()
     yield
 
@@ -230,6 +231,50 @@ async def _ensure_system_deps() -> None:
         logger.debug(
             'System dependency check skipped (non-fatal)', exc_info=True
         )
+
+
+async def _ensure_vendor_assets() -> None:
+    """Download Tailwind and Font Awesome vendor assets on first boot if missing.
+
+    Uses unpkg.com (already trusted — Vue loads from there) so Pi-hole rules
+    that block cdn.tailwindcss.com / cdnjs.cloudflare.com don't interfere.
+    Files land in ui/vendor/ which is gitignored.
+    """
+    vendor_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'ui', 'vendor'
+    )
+    base = 'https://unpkg.com'
+    assets = [
+        ('tailwind.cdn.js', f'{base}/tailwindcss@3/dist/cdn.min.js'),
+        ('fa/css/all.min.css', f'{base}/@fortawesome/fontawesome-free@6.0.0/css/all.min.css'),
+        ('fa/webfonts/fa-solid-900.woff2', f'{base}/@fortawesome/fontawesome-free@6.0.0/webfonts/fa-solid-900.woff2'),
+        ('fa/webfonts/fa-solid-900.woff', f'{base}/@fortawesome/fontawesome-free@6.0.0/webfonts/fa-solid-900.woff'),
+        ('fa/webfonts/fa-regular-400.woff2', f'{base}/@fortawesome/fontawesome-free@6.0.0/webfonts/fa-regular-400.woff2'),
+        ('fa/webfonts/fa-regular-400.woff', f'{base}/@fortawesome/fontawesome-free@6.0.0/webfonts/fa-regular-400.woff'),
+        ('fa/webfonts/fa-brands-400.woff2', f'{base}/@fortawesome/fontawesome-free@6.0.0/webfonts/fa-brands-400.woff2'),
+        ('fa/webfonts/fa-brands-400.woff', f'{base}/@fortawesome/fontawesome-free@6.0.0/webfonts/fa-brands-400.woff'),
+    ]
+
+    missing = [(p, u) for p, u in assets if not os.path.exists(os.path.join(vendor_dir, p))]
+    if not missing:
+        return
+
+    logger.info('Downloading %d vendor asset(s) to ui/vendor/...', len(missing))
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            for rel_path, url in missing:
+                dest = os.path.join(vendor_dir, rel_path)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                try:
+                    response = await client.get(url)
+                    response.raise_for_status()
+                    with open(dest, 'wb') as f:
+                        f.write(response.content)
+                    logger.info('Vendor asset downloaded: %s', rel_path)
+                except Exception as e:
+                    logger.warning('Failed to download vendor asset %s: %s', rel_path, e)
+    except Exception as e:
+        logger.warning('Vendor asset download skipped: %s', e)
 
 
 async def _get_beacon_remote_version(beacon_path: str) -> Optional[str]:
