@@ -49,7 +49,7 @@ async def lifespan(application: FastAPI):
 
 
 app = FastAPI(
-    title='KlipperFleet API', version='1.3.1-alpha', lifespan=lifespan
+    title='KlipperFleet API', version='1.3.2-alpha', lifespan=lifespan
 )
 
 # Configuration
