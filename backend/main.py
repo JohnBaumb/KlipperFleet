@@ -234,18 +234,18 @@ async def _ensure_system_deps() -> None:
 
 
 async def _ensure_vendor_assets() -> None:
-    """Download Tailwind and Font Awesome vendor assets on first boot if missing.
+    """Download Font Awesome vendor assets on first boot if missing.
 
     Uses unpkg.com (already trusted — Vue loads from there) so Pi-hole rules
-    that block cdn.tailwindcss.com / cdnjs.cloudflare.com don't interfere.
+    that block cdnjs.cloudflare.com don't interfere.
     Files land in ui/vendor/ which is gitignored.
+    Tailwind CSS is pre-built and committed as ui/tailwind.built.css (no download needed).
     """
     vendor_dir = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'ui', 'vendor'
     )
     base = 'https://unpkg.com'
     assets = [
-        ('tailwind.cdn.js', f'{base}/tailwindcss@3/dist/cdn.min.js'),
         ('fa/css/all.min.css', f'{base}/@fortawesome/fontawesome-free@6.0.0/css/all.min.css'),
         ('fa/webfonts/fa-solid-900.woff2', f'{base}/@fortawesome/fontawesome-free@6.0.0/webfonts/fa-solid-900.woff2'),
         ('fa/webfonts/fa-solid-900.woff', f'{base}/@fortawesome/fontawesome-free@6.0.0/webfonts/fa-solid-900.woff'),
