@@ -534,6 +534,7 @@ class Device(BaseModel):
     dfu_exit_tested: bool = False
     use_dfu_exit: bool = False
     exclude_from_batch: bool = False
+    exclude_from_build: bool = False
     custom_make_command: Optional[str] = None
 
 
@@ -1043,6 +1044,21 @@ async def cancel_task_operation(task_id: str) -> Dict[str, str]:
     return {'message': 'Cancellation requested'}
 
 
+def get_batch_builds_needed(
+    devices: List[Dict[str, Any]]
+) -> Dict[tuple, Optional[str]]:
+    """Return unique builds needed for batch build operations."""
+    builds_needed: Dict[tuple, Optional[str]] = {}
+    for device in devices:
+        if device.get('profile') and not device.get('exclude_from_build', False):
+            key = (
+                device['profile'],
+                device.get('custom_make_command') or None,
+            )
+            builds_needed[key] = key[1]
+    return builds_needed
+
+
 @app.get('/batch/{action}')
 async def batch_operation(
     action: str, background_tasks: BackgroundTasks
@@ -1070,11 +1086,7 @@ async def batch_operation(
                     task_id, '>>> STARTING BATCH BUILD PHASE <<<\n'
                 )
                 # Deduplicate by (profile, custom_make_command) to handle devices with custom build steps
-                builds_needed: Dict[tuple, Optional[str]] = {}
-                for d in devices:
-                    if d.get('profile'):
-                        key = (d['profile'], d.get('custom_make_command') or None)
-                        builds_needed[key] = key[1]
+                builds_needed = get_batch_builds_needed(devices)
                 if not builds_needed:
                     task_store.add_log(
                         task_id,

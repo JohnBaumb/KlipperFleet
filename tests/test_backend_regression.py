@@ -727,6 +727,34 @@ class TestMakeFlash:
         assert dev_true.get('is_katapult', True) is True
         assert dev_false.get('is_katapult', True) is False
 
+    def test_batch_build_skips_devices_excluded_from_build(self):
+        """Batch builds should skip devices excluded from Build All."""
+        from backend.main import get_batch_builds_needed
+
+        devices = [
+            {"profile": "mainboard", "exclude_from_build": False},
+            {"profile": "toolhead", "exclude_from_build": True},
+        ]
+
+        builds = get_batch_builds_needed(devices)
+
+        assert ("mainboard", None) in builds
+        assert ("toolhead", None) not in builds
+
+    def test_flash_exclusion_does_not_exclude_build(self):
+        """Flash and build exclusions should remain independent."""
+        from backend.main import get_batch_builds_needed
+
+        devices = [
+            {
+                "profile": "toolhead",
+                "exclude_from_batch": True,
+                "exclude_from_build": False,
+            },
+        ]
+
+        assert ("toolhead", None) in get_batch_builds_needed(devices)
+
 
 # ---------------------------------------------------------------------------
 # AVR auto-detection from profile config
