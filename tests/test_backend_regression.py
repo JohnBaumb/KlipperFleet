@@ -717,6 +717,42 @@ class TestMakeFlash:
         # Linux is never skipped
         assert not should_skip(dev_linux, "service")
 
+    def test_flash_ready_allows_direct_serial_service_status(self):
+        """Flash Ready should flash non-Katapult serial devices in service."""
+        from backend.main import should_flash_batch_device
+
+        device = {"method": "serial", "is_katapult": False}
+
+        assert should_flash_batch_device("build-flash-ready", device, "service")
+
+    def test_flash_ready_rejects_katapult_service_status(self):
+        """Flash Ready should still require ready status for Katapult devices."""
+        from backend.main import should_flash_batch_device
+
+        device = {"method": "serial", "is_katapult": True}
+
+        assert not should_flash_batch_device(
+            "build-flash-ready", device, "service"
+        )
+
+    def test_flash_ready_rejects_offline_direct_serial(self):
+        """Flash Ready should not attempt an offline direct serial device."""
+        from backend.main import should_flash_batch_device
+
+        device = {"method": "serial", "is_katapult": False}
+
+        assert not should_flash_batch_device(
+            "build-flash-ready", device, "offline"
+        )
+
+    def test_flash_all_still_allows_any_status(self):
+        """Flash All behavior should remain unchanged."""
+        from backend.main import should_flash_batch_device
+
+        device = {"method": "can", "is_katapult": True}
+
+        assert should_flash_batch_device("build-flash-all", device, "service")
+
     def test_is_katapult_defaults_true(self):
         """Devices without explicit is_katapult should default to True (backward compatibility)."""
         dev_no_flag = {"method": "serial"}

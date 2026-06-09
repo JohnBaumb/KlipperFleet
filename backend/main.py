@@ -1079,6 +1079,21 @@ def get_build_label(profile: str, custom_cmd: Optional[str]) -> str:
     return f'{profile} (custom: {custom_cmd})' if custom_cmd else profile
 
 
+def should_flash_batch_device(
+    action: str, device: Dict[str, Any], status: str
+) -> bool:
+    """Return whether a device should flash for the requested batch action."""
+    if 'flash-all' in action:
+        return True
+    if 'flash-ready' not in action:
+        return False
+
+    is_direct_serial = device.get('method') == 'serial' and not device.get(
+        'is_katapult', True
+    )
+    return status == 'ready' or (is_direct_serial and status == 'service')
+
+
 @app.get('/batch/{action}')
 async def batch_operation(
     action: str, background_tasks: BackgroundTasks
@@ -1501,11 +1516,7 @@ async def batch_operation(
                     )
                     task_store.update_device_status(task_id, dev['id'], status)
 
-                    should_flash = False
-                    if 'flash-all' in action:
-                        should_flash = True
-                    elif 'flash-ready' in action and status == 'ready':
-                        should_flash = True
+                    should_flash = should_flash_batch_device(action, dev, status)
 
                     if should_flash:
                         # CAN bridge already in Katapult serial mode: switch to serial flash
