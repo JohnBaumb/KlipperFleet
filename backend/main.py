@@ -1059,6 +1059,26 @@ def get_batch_builds_needed(
     return builds_needed
 
 
+def get_excluded_batch_builds(
+    devices: List[Dict[str, Any]], builds_needed: Dict[tuple, Optional[str]]
+) -> Dict[tuple, Optional[str]]:
+    """Return excluded build targets not required by another active device."""
+    excluded_builds: Dict[tuple, Optional[str]] = {}
+    for device in devices:
+        if device.get('profile') and device.get('exclude_from_build', False):
+            key = (
+                device['profile'],
+                device.get('custom_make_command') or None,
+            )
+            if key not in builds_needed:
+                excluded_builds[key] = key[1]
+    return excluded_builds
+
+
+def get_build_label(profile: str, custom_cmd: Optional[str]) -> str:
+    return f'{profile} (custom: {custom_cmd})' if custom_cmd else profile
+
+
 @app.get('/batch/{action}')
 async def batch_operation(
     action: str, background_tasks: BackgroundTasks
@@ -1070,7 +1090,9 @@ async def batch_operation(
     async def run_task() -> None:
         services_stopped = False
         # Result tracking for summary
-        build_results: Dict[str, str] = {}  # profile -> "SUCCESS"/"FAILED"
+        build_results: Dict[
+            str, str
+        ] = {}  # build label -> "SUCCESS"/"EXCLUDED"/"FAILED"
         flash_results: Dict[
             str, str
         ] = {}  # device_name -> "SUCCESS"/"SKIPPED"/"FAILED"
@@ -1087,16 +1109,30 @@ async def batch_operation(
                 )
                 # Deduplicate by (profile, custom_make_command) to handle devices with custom build steps
                 builds_needed = get_batch_builds_needed(devices)
+                excluded_builds = get_excluded_batch_builds(
+                    devices, builds_needed
+                )
+                for profile, custom_cmd in excluded_builds:
+                    build_results[get_build_label(profile, custom_cmd)] = (
+                        'EXCLUDED'
+                    )
                 if not builds_needed:
+                    message = (
+                        '>>> All assigned profiles are excluded from Build All. '
+                        'Skipping build.\n'
+                        if excluded_builds
+                        else '>>> No profiles assigned to fleet devices. '
+                        'Skipping build.\n'
+                    )
                     task_store.add_log(
                         task_id,
-                        '>>> No profiles assigned to fleet devices. Skipping build.\n',
+                        message,
                     )
                 else:
                     for (profile, custom_cmd), _ in builds_needed.items():
                         if task_store.is_cancelled(task_id):
                             return
-                        label = f'{profile} (custom: {custom_cmd})' if custom_cmd else profile
+                        label = get_build_label(profile, custom_cmd)
                         task_store.add_log(
                             task_id,
                             f'\n>>> BATCH BUILD: Starting {label}...\n',
@@ -1111,7 +1147,7 @@ async def batch_operation(
                             task_store.add_log(task_id, log)
                             if '!!! Error' in log or 'Build failed' in log:
                                 build_success = False
-                        build_results[profile] = (
+                        build_results[label] = (
                             'SUCCESS' if build_success else 'FAILED'
                         )
                         task_store.add_log(
@@ -1819,6 +1855,11 @@ async def batch_operation(
                         task_store.add_log(
                             task_id,
                             f'  [COLOR:GREEN]  - {profile}: {result}[/COLOR]\n',
+                        )
+                    elif result == 'EXCLUDED':
+                        task_store.add_log(
+                            task_id,
+                            f'  [COLOR:YELLOW]  - {profile}: {result}[/COLOR]\n',
                         )
                     else:
                         task_store.add_log(
