@@ -1079,6 +1079,13 @@ def get_build_label(profile: str, custom_cmd: Optional[str]) -> str:
     return f'{profile} (custom: {custom_cmd})' if custom_cmd else profile
 
 
+def is_excluded_from_batch(device: Dict[str, Any]) -> bool:
+    """Build-excluded devices must also be excluded from batch flashing."""
+    return device.get('exclude_from_batch', False) or device.get(
+        'exclude_from_build', False
+    )
+
+
 def should_flash_batch_device(
     action: str, device: Dict[str, Any], status: str
 ) -> bool:
@@ -1190,10 +1197,10 @@ async def batch_operation(
 
                 # Filter out devices excluded from batch operations
                 excluded_devices = [
-                    d for d in devices if d.get('exclude_from_batch', False)
+                    d for d in devices if is_excluded_from_batch(d)
                 ]
                 devices = [
-                    d for d in devices if not d.get('exclude_from_batch', False)
+                    d for d in devices if not is_excluded_from_batch(d)
                 ]
                 if excluded_devices:
                     excluded_names = ', '.join(
@@ -1948,6 +1955,9 @@ async def download_firmware(profile: str) -> FileResponse:
 async def get_fleet(fast: bool = False) -> List[Dict[str, Any]]:
     """Returns the registered fleet of devices with status."""
     fleet: List[Dict[str, Any]] = await fleet_mgr.get_fleet()
+    for dev in fleet:
+        if dev.get('exclude_from_build'):
+            dev['exclude_from_batch'] = True
 
     # Check for active tasks to get real-time status overrides
     status_overrides = {}
@@ -2042,6 +2052,8 @@ async def save_device(device: Device) -> Dict[str, str]:
     data = device.dict()
     # Beacon devices are always excluded from batch operations
     if data.get('method') == 'beacon':
+        data['exclude_from_batch'] = True
+    if data.get('exclude_from_build'):
         data['exclude_from_batch'] = True
     await fleet_mgr.save_device(data)
     return {'message': 'Device saved to fleet'}

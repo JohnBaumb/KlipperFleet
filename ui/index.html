@@ -526,12 +526,12 @@
                                             </span>
                                         </div>
                                         <div v-if="dev.method !== 'beacon'" class="flex flex-col items-start space-y-2">
-                                            <label class="flex items-center space-x-2 cursor-pointer group" :title="'This device will only be flashed when done individually. It will be skipped during Flash All, Build & Flash Ready, and Build & Flash All operations.'">
-                                                <input type="checkbox" v-model="dev.exclude_from_batch" @change="updateFleetDevice(dev)" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-orange-600 focus:ring-orange-500">
+                                            <label class="flex items-center space-x-2 cursor-pointer group" :class="{'opacity-60 cursor-not-allowed': dev.exclude_from_build}" :title="dev.exclude_from_build ? 'Required because this device is excluded from Build All.' : 'This device will only be flashed when done individually. It will be skipped during Flash All, Build & Flash Ready, and Build & Flash All operations.'">
+                                                <input type="checkbox" v-model="dev.exclude_from_batch" @change="updateFleetDevice(dev)" :disabled="dev.exclude_from_build" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-orange-600 focus:ring-orange-500 disabled:cursor-not-allowed">
                                                 <span class="text-[10px] text-orange-400 group-hover:text-orange-300 uppercase font-bold">Exclude from Flash All</span>
                                             </label>
-                                            <label class="flex items-center space-x-2 cursor-pointer group" :title="'This device will not be compiled during Build All, Build & Flash Ready, or Build & Flash All operations. Individual builds are unaffected.'">
-                                                <input type="checkbox" v-model="dev.exclude_from_build" @change="updateFleetDevice(dev)" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-orange-600 focus:ring-orange-500">
+                                            <label class="flex items-center space-x-2 cursor-pointer group" :title="'This device will not be compiled during Build All, Build & Flash Ready, or Build & Flash All operations and will also be excluded from batch flashing. Individual builds are unaffected.'">
+                                                <input type="checkbox" v-model="dev.exclude_from_build" @change="onExcludeFromBuildChange(dev)" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-orange-600 focus:ring-orange-500">
                                                 <span class="text-[10px] text-orange-400 group-hover:text-orange-300 uppercase font-bold">Exclude from Build All</span>
                                             </label>
                                         </div>
@@ -1833,6 +1833,13 @@
                     }
                 };
 
+                const onExcludeFromBuildChange = async (dev) => {
+                    if (dev.exclude_from_build) {
+                        dev.exclude_from_batch = true;
+                    }
+                    await updateFleetDevice(dev);
+                };
+
                 const onDeviceProfileChange = async (dev) => {
                     const info = profileInfo.value[dev.profile];
                     if (info) {
@@ -2154,7 +2161,7 @@
                     view, sidebarOpen, configTree, profiles, fleet, selectedProfile, loading, building, flashing, updating, querying, printing, printState, printFilename,
                     buildLogs, formattedLogs, expandLogs, expandLogsHeight, updateValue, saveProfile, saveProfileAs, newProfile, deleteProfile, renameProfile, loadProfile, createMissingProfile, startBuild, runBatch, selfUpdate,
                     devices, selectedDevice, discoverDevices, startFlash, quickFlash, quickBuild, quickFlashOnly, flashBeacon, beaconUpToDate, buildAndDownload, rebootDevice, statusColor, formatStatus,
-                    addDeviceToFleet, attachToFleet, updateFleetDevice, onDeviceProfileChange, removeDeviceFromFleet, error, modifiedValues, formatNotes,
+                    addDeviceToFleet, attachToFleet, updateFleetDevice, onExcludeFromBuildChange, onDeviceProfileChange, removeDeviceFromFleet, error, modifiedValues, formatNotes,
                     printerUrl, printerTitle, hasReferrer, profileInfo, isProfileCanBridge, isProfileLinux,
                     modal, showAlert, showConfirm, showPrompt, closeModal, testMagicBaud,
                     services, manageServices, cancelTask, currentTaskId,

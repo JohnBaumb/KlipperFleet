@@ -791,6 +791,28 @@ class TestMakeFlash:
 
         assert ("toolhead", None) in get_batch_builds_needed(devices)
 
+    def test_build_exclusion_also_excludes_batch_flash(self):
+        """Build-excluded devices should never use stale firmware in batch flash."""
+        from backend.main import is_excluded_from_batch
+
+        device = {
+            "exclude_from_batch": False,
+            "exclude_from_build": True,
+        }
+
+        assert is_excluded_from_batch(device)
+
+    def test_flash_exclusion_remains_independent(self):
+        """Flash-only exclusion should remain supported."""
+        from backend.main import is_excluded_from_batch
+
+        device = {
+            "exclude_from_batch": True,
+            "exclude_from_build": False,
+        }
+
+        assert is_excluded_from_batch(device)
+
     def test_excluded_batch_builds_appear_when_not_needed(self):
         """Excluded-only build targets should be available for the summary."""
         from backend.main import (
