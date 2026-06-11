@@ -534,7 +534,6 @@ class Device(BaseModel):
     dfu_exit_tested: bool = False
     use_dfu_exit: bool = False
     exclude_from_batch: bool = False
-    exclude_from_build: bool = False
     custom_make_command: Optional[str] = None
 
 
@@ -1044,41 +1043,6 @@ async def cancel_task_operation(task_id: str) -> Dict[str, str]:
     return {'message': 'Cancellation requested'}
 
 
-def get_batch_builds_needed(
-    devices: List[Dict[str, Any]]
-) -> Dict[tuple, Optional[str]]:
-    """Return unique builds needed for batch build operations."""
-    builds_needed: Dict[tuple, Optional[str]] = {}
-    for device in devices:
-        if device.get('profile') and not device.get('exclude_from_build', False):
-            key = (
-                device['profile'],
-                device.get('custom_make_command') or None,
-            )
-            builds_needed[key] = key[1]
-    return builds_needed
-
-
-def get_excluded_batch_builds(
-    devices: List[Dict[str, Any]], builds_needed: Dict[tuple, Optional[str]]
-) -> Dict[tuple, Optional[str]]:
-    """Return excluded build targets not required by another active device."""
-    excluded_builds: Dict[tuple, Optional[str]] = {}
-    for device in devices:
-        if device.get('profile') and device.get('exclude_from_build', False):
-            key = (
-                device['profile'],
-                device.get('custom_make_command') or None,
-            )
-            if key not in builds_needed:
-                excluded_builds[key] = key[1]
-    return excluded_builds
-
-
-def get_build_label(profile: str, custom_cmd: Optional[str]) -> str:
-    return f'{profile} (custom: {custom_cmd})' if custom_cmd else profile
-
-
 def should_flash_batch_device(
     action: str, device: Dict[str, Any], status: str
 ) -> bool:
@@ -1105,9 +1069,7 @@ async def batch_operation(
     async def run_task() -> None:
         services_stopped = False
         # Result tracking for summary
-        build_results: Dict[
-            str, str
-        ] = {}  # build label -> "SUCCESS"/"EXCLUDED"/"FAILED"
+        build_results: Dict[str, str] = {}  # profile -> "SUCCESS"/"FAILED"
         flash_results: Dict[
             str, str
         ] = {}  # device_name -> "SUCCESS"/"SKIPPED"/"FAILED"
@@ -1123,31 +1085,21 @@ async def batch_operation(
                     task_id, '>>> STARTING BATCH BUILD PHASE <<<\n'
                 )
                 # Deduplicate by (profile, custom_make_command) to handle devices with custom build steps
-                builds_needed = get_batch_builds_needed(devices)
-                excluded_builds = get_excluded_batch_builds(
-                    devices, builds_needed
-                )
-                for profile, custom_cmd in excluded_builds:
-                    build_results[get_build_label(profile, custom_cmd)] = (
-                        'EXCLUDED'
-                    )
+                builds_needed: Dict[tuple, Optional[str]] = {}
+                for d in devices:
+                    if d.get('profile'):
+                        key = (d['profile'], d.get('custom_make_command') or None)
+                        builds_needed[key] = key[1]
                 if not builds_needed:
-                    message = (
-                        '>>> All assigned profiles are excluded from Build All. '
-                        'Skipping build.\n'
-                        if excluded_builds
-                        else '>>> No profiles assigned to fleet devices. '
-                        'Skipping build.\n'
-                    )
                     task_store.add_log(
                         task_id,
-                        message,
+                        '>>> No profiles assigned to fleet devices. Skipping build.\n',
                     )
                 else:
                     for (profile, custom_cmd), _ in builds_needed.items():
                         if task_store.is_cancelled(task_id):
                             return
-                        label = get_build_label(profile, custom_cmd)
+                        label = f'{profile} (custom: {custom_cmd})' if custom_cmd else profile
                         task_store.add_log(
                             task_id,
                             f'\n>>> BATCH BUILD: Starting {label}...\n',
@@ -1162,7 +1114,7 @@ async def batch_operation(
                             task_store.add_log(task_id, log)
                             if '!!! Error' in log or 'Build failed' in log:
                                 build_success = False
-                        build_results[label] = (
+                        build_results[profile] = (
                             'SUCCESS' if build_success else 'FAILED'
                         )
                         task_store.add_log(
@@ -1866,11 +1818,6 @@ async def batch_operation(
                         task_store.add_log(
                             task_id,
                             f'  [COLOR:GREEN]  - {profile}: {result}[/COLOR]\n',
-                        )
-                    elif result == 'EXCLUDED':
-                        task_store.add_log(
-                            task_id,
-                            f'  [COLOR:YELLOW]  - {profile}: {result}[/COLOR]\n',
                         )
                     else:
                         task_store.add_log(
