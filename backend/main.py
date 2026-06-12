@@ -1086,21 +1086,6 @@ def is_excluded_from_batch(device: Dict[str, Any]) -> bool:
     )
 
 
-def should_flash_batch_device(
-    action: str, device: Dict[str, Any], status: str
-) -> bool:
-    """Return whether a device should flash for the requested batch action."""
-    if 'flash-all' in action:
-        return True
-    if 'flash-ready' not in action:
-        return False
-
-    is_direct_serial = device.get('method') == 'serial' and not device.get(
-        'is_katapult', True
-    )
-    return status == 'ready' or (is_direct_serial and status == 'service')
-
-
 @app.get('/batch/{action}')
 async def batch_operation(
     action: str, background_tasks: BackgroundTasks
