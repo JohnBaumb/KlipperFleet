@@ -717,6 +717,7 @@ class TestMakeFlash:
         # Linux is never skipped
         assert not should_skip(dev_linux, "service")
 
+
     def test_is_katapult_defaults_true(self):
         """Devices without explicit is_katapult should default to True (backward compatibility)."""
         dev_no_flag = {"method": "serial"}
@@ -726,6 +727,86 @@ class TestMakeFlash:
         assert dev_no_flag.get('is_katapult', True) is True
         assert dev_true.get('is_katapult', True) is True
         assert dev_false.get('is_katapult', True) is False
+
+    def test_batch_build_skips_devices_excluded_from_build(self):
+        """Batch builds should skip devices excluded from Build All."""
+        from backend.main import get_batch_builds_needed
+
+        devices = [
+            {"profile": "mainboard", "exclude_from_build": False},
+            {"profile": "toolhead", "exclude_from_build": True},
+        ]
+
+        builds = get_batch_builds_needed(devices)
+
+        assert ("mainboard", None) in builds
+        assert ("toolhead", None) not in builds
+
+    def test_flash_exclusion_does_not_exclude_build(self):
+        """Flash and build exclusions should remain independent."""
+        from backend.main import get_batch_builds_needed
+
+        devices = [
+            {
+                "profile": "toolhead",
+                "exclude_from_batch": True,
+                "exclude_from_build": False,
+            },
+        ]
+
+        assert ("toolhead", None) in get_batch_builds_needed(devices)
+
+    def test_build_exclusion_also_excludes_batch_flash(self):
+        """Build-excluded devices should never use stale firmware in batch flash."""
+        from backend.main import is_excluded_from_batch
+
+        device = {
+            "exclude_from_batch": False,
+            "exclude_from_build": True,
+        }
+
+        assert is_excluded_from_batch(device)
+
+    def test_flash_exclusion_remains_independent(self):
+        """Flash-only exclusion should remain supported."""
+        from backend.main import is_excluded_from_batch
+
+        device = {
+            "exclude_from_batch": True,
+            "exclude_from_build": False,
+        }
+
+        assert is_excluded_from_batch(device)
+
+    def test_excluded_batch_builds_appear_when_not_needed(self):
+        """Excluded-only build targets should be available for the summary."""
+        from backend.main import (
+            get_batch_builds_needed,
+            get_excluded_batch_builds,
+        )
+
+        devices = [
+            {"profile": "mainboard", "exclude_from_build": False},
+            {"profile": "toolhead", "exclude_from_build": True},
+        ]
+        builds = get_batch_builds_needed(devices)
+
+        assert ("toolhead", None) in get_excluded_batch_builds(devices, builds)
+
+    def test_shared_active_build_is_not_reported_excluded(self):
+        """A shared target should build if any device still requires it."""
+        from backend.main import (
+            get_batch_builds_needed,
+            get_excluded_batch_builds,
+        )
+
+        devices = [
+            {"profile": "shared", "exclude_from_build": True},
+            {"profile": "shared", "exclude_from_build": False},
+        ]
+        builds = get_batch_builds_needed(devices)
+
+        assert ("shared", None) not in get_excluded_batch_builds(devices, builds)
 
 
 # ---------------------------------------------------------------------------
