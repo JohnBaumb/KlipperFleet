@@ -1508,7 +1508,11 @@ async def batch_operation(
                     )
                     task_store.update_device_status(task_id, dev['id'], status)
 
-                    should_flash = should_flash_batch_device(action, dev, status)
+                    should_flash = False
+                    if 'flash-all' in action:
+                        should_flash = True
+                    elif 'flash-ready' in action and status == 'ready':
+                        should_flash = True
 
                     if should_flash:
                         # CAN bridge already in Katapult serial mode: switch to serial flash
