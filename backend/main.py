@@ -390,14 +390,54 @@ def resolve_firmware_path(profile_name: str, method: str) -> Optional[str]:
     return None
 
 
-def is_avr_profile(profile_name: str) -> bool:
-    """Check if a profile targets an AVR microcontroller."""
+def _read_profile_config(profile_name: str) -> Optional[str]:
+    """Returns the raw profile config content, or None if unavailable."""
     config_path = os.path.join(PROFILES_DIR, f'{profile_name}.config')
     try:
         with open(config_path, 'r') as f:
-            return 'CONFIG_MACH_AVR=y' in f.read()
+            return f.read()
     except Exception:
+        return None
+
+
+def is_avr_profile(profile_name: str) -> bool:
+    """Check if a profile targets an AVR microcontroller."""
+    content = _read_profile_config(profile_name)
+    return content is not None and 'CONFIG_MACH_AVR=y' in content
+
+
+def is_direct_serial_profile(profile_name: str) -> bool:
+    """Check if a profile flashes directly via `make flash` instead of Katapult."""
+    content = _read_profile_config(profile_name)
+    if content is None:
         return False
+    return any(
+        marker in content
+        for marker in ('CONFIG_MACH_AVR=y', 'CONFIG_MACH_SAM=y')
+    )
+
+
+def resolve_is_katapult(device: Dict[str, Any]) -> bool:
+    """Normalizes whether a device should use Katapult-based serial flashing."""
+    if device.get('method') != 'serial':
+        return device.get('is_katapult', True)
+
+    if device.get('is_bridge'):
+        return True
+
+    if device.get('is_katapult') is False:
+        return False
+
+    profile_name = device.get('profile')
+    if profile_name and is_direct_serial_profile(profile_name):
+        return False
+
+    return True
+
+
+def is_direct_serial_device(device: Dict[str, Any]) -> bool:
+    """Returns True when a serial MCU should flash directly without Katapult."""
+    return device.get('method') == 'serial' and not resolve_is_katapult(device)
 
 
 def get_flash_offset(profile_name: str) -> str:
@@ -1052,9 +1092,7 @@ def should_flash_batch_device(
     if 'flash-ready' not in action:
         return False
 
-    is_direct_serial = device.get('method') == 'serial' and not device.get(
-        'is_katapult', True
-    )
+    is_direct_serial = is_direct_serial_device(device)
     return status == 'ready' or (is_direct_serial and status == 'service')
 
 
@@ -1162,12 +1200,10 @@ async def batch_operation(
                     '>>> Checking device statuses before stopping services...\n',
                 )
 
-                # Auto-detect AVR profiles and override is_katapult for devices that target AVR MCUs.
-                # This ensures AVR devices (e.g. ATmega2560) are never sent through the Katapult path,
-                # even if the user hasn't explicitly set is_katapult: false in the fleet.
+                # Normalize serial direct-flash profiles so batch mode treats
+                # them consistently even for older fleet entries missing the flag.
                 for dev in devices:
-                    if dev.get('profile') and is_avr_profile(dev['profile']):
-                        dev['is_katapult'] = False
+                    dev['is_katapult'] = resolve_is_katapult(dev)
 
                 # Issue #16: Auto-correct method for USB-to-CAN bridges whose device_id
                 # is a /dev/ serial path but method is "can".  These bridges connect via
@@ -1231,10 +1267,7 @@ async def batch_operation(
                         needs_reboot = (
                             not dev.get('is_bridge')
                             and dev['method'] in ('can', 'serial', 'dfu')
-                            and not (
-                                dev['method'] == 'serial'
-                                and not dev.get('is_katapult', True)
-                            )
+                            and not is_direct_serial_device(dev)
                         )
                         if needs_reboot:
                             reboot_tasks.append(
@@ -1615,9 +1648,7 @@ async def batch_operation(
                                     continue
 
                         # Non-Katapult serial devices (e.g. AVR) flash directly without bootloader
-                        is_direct_serial = dev[
-                            'method'
-                        ] == 'serial' and not dev.get('is_katapult', True)
+                        is_direct_serial = is_direct_serial_device(dev)
                         if (
                             status not in ['ready', 'dfu']
                             and dev['method'] != 'linux'
@@ -1651,9 +1682,7 @@ async def batch_operation(
                         )
                         batch_flash_ok = False
                         try:
-                            if dev['method'] == 'serial' and not dev.get(
-                                'is_katapult', True
-                            ):
+                            if is_direct_serial_device(dev):
                                 # Non-Katapult serial device — flash via make flash (handles AVR, RP2040, etc.)
                                 config_path: str = os.path.join(
                                     PROFILES_DIR, f'{dev["profile"]}.config'
@@ -1987,6 +2016,7 @@ async def get_fleet(fast: bool = False) -> List[Dict[str, Any]]:
 async def save_device(device: Device) -> Dict[str, str]:
     """Registers or updates a device in the fleet."""
     data = device.dict()
+    data['is_katapult'] = resolve_is_katapult(data)
     # Beacon devices are always excluded from batch operations
     if data.get('method') == 'beacon':
         data['exclude_from_batch'] = True
@@ -2285,8 +2315,14 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                 )
 
             # Auto-detect AVR from profile — override is_katapult if profile targets AVR
-            if is_avr_profile(req.profile):
-                is_katapult = False
+            is_katapult = resolve_is_katapult(
+                {
+                    'method': req.method,
+                    'profile': req.profile,
+                    'is_katapult': is_katapult,
+                    'is_bridge': is_bridge,
+                }
+            )
 
             # Snapshot current serial devices BEFORE reboot (for diff-based detection)
             initial_serials: List[str] = [

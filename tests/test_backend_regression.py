@@ -763,7 +763,35 @@ class TestMakeFlash:
         assert dev_true.get('is_katapult', True) is True
         assert dev_false.get('is_katapult', True) is False
 
-    
+    def test_flash_ready_allows_direct_serial_service_status_from_profile(self, tmp_path):
+        """Flash Ready should infer direct serial flash from the profile for older fleet entries."""
+        config = tmp_path / "sam4e8e.config"
+        config.write_text("CONFIG_MACH_SAM=y\nCONFIG_MCU=sam4e8e\n")
+
+        with patch("backend.main.PROFILES_DIR", str(tmp_path)):
+            from backend.main import should_flash_batch_device
+
+            device = {"method": "serial", "profile": "sam4e8e"}
+
+            assert should_flash_batch_device(
+                "build-flash-ready", device, "service"
+            )
+
+    def test_flash_ready_rejects_service_for_katapult_profile_without_flag(self, tmp_path):
+        """Flash Ready must keep requiring ready status for serial Katapult MCUs."""
+        config = tmp_path / "spider.config"
+        config.write_text("CONFIG_MACH_STM32=y\n")
+
+        with patch("backend.main.PROFILES_DIR", str(tmp_path)):
+            from backend.main import should_flash_batch_device
+
+            device = {"method": "serial", "profile": "spider"}
+
+            assert not should_flash_batch_device(
+                "build-flash-ready", device, "service"
+            )
+
+ 
 # ---------------------------------------------------------------------------
 # AVR auto-detection from profile config
 # ---------------------------------------------------------------------------
@@ -804,13 +832,11 @@ class TestAvrProfileAutoDetection:
         config.write_text("CONFIG_MACH_AVR=y\n")
 
         with patch("backend.main.PROFILES_DIR", str(tmp_path)):
-            from backend.main import is_avr_profile
+            from backend.main import resolve_is_katapult
 
-            # Default from fleet (no explicit setting)
-            is_katapult = True
-            profile = "mega"
-            if is_avr_profile(profile):
-                is_katapult = False
+            is_katapult = resolve_is_katapult(
+                {"method": "serial", "profile": "mega", "is_katapult": True}
+            )
 
             assert is_katapult is False
 
@@ -820,41 +846,57 @@ class TestAvrProfileAutoDetection:
         config.write_text("CONFIG_MACH_STM32=y\n")
 
         with patch("backend.main.PROFILES_DIR", str(tmp_path)):
-            from backend.main import is_avr_profile
+            from backend.main import resolve_is_katapult
 
-            is_katapult = True
-            profile = "spider"
-            if is_avr_profile(profile):
-                is_katapult = False
+            is_katapult = resolve_is_katapult(
+                {"method": "serial", "profile": "spider", "is_katapult": True}
+            )
 
             assert is_katapult is True
 
-    def test_batch_normalizes_katapult_for_avr_devices(self, tmp_path):
-        """In batch flash, devices with AVR profiles should have is_katapult set to False."""
+    def test_single_flash_overrides_katapult_for_sam(self, tmp_path):
+        """In single-flash path, SAM profiles should also bypass Katapult."""
+        config = tmp_path / "sam4e8e.config"
+        config.write_text("CONFIG_MACH_SAM=y\nCONFIG_MCU=sam4e8e\n")
+
+        with patch("backend.main.PROFILES_DIR", str(tmp_path)):
+            from backend.main import resolve_is_katapult
+
+            is_katapult = resolve_is_katapult(
+                {"method": "serial", "profile": "sam4e8e", "is_katapult": True}
+            )
+
+            assert is_katapult is False
+
+    def test_batch_normalizes_katapult_for_direct_serial_profiles(self, tmp_path):
+        """Batch flash should normalize direct-serial AVR and SAM profiles."""
         config = tmp_path / "2560.config"
         config.write_text("CONFIG_MACH_AVR=y\nCONFIG_MCU=atmega2560\n")
+        sam_config = tmp_path / "sam4e8e.config"
+        sam_config.write_text("CONFIG_MACH_SAM=y\nCONFIG_MCU=sam4e8e\n")
         stm_config = tmp_path / "spider.config"
         stm_config.write_text("CONFIG_MACH_STM32=y\n")
 
         devices = [
             {"id": "avr-dev", "method": "serial", "profile": "2560", "name": "AVR"},
+            {"id": "sam-dev", "method": "serial", "profile": "sam4e8e", "name": "SAM"},
             {"id": "stm-dev", "method": "serial", "profile": "spider", "name": "STM", "is_katapult": True},
             {"id": "no-profile", "method": "serial", "profile": "", "name": "Empty"},
         ]
 
         with patch("backend.main.PROFILES_DIR", str(tmp_path)):
-            from backend.main import is_avr_profile
+            from backend.main import resolve_is_katapult
             # Replicate the batch normalization loop
             for dev in devices:
-                if dev.get('profile') and is_avr_profile(dev['profile']):
-                    dev['is_katapult'] = False
+                dev['is_katapult'] = resolve_is_katapult(dev)
 
-        # AVR device should have is_katapult forced False
+        # AVR and SAM devices should have is_katapult forced False
         assert devices[0].get('is_katapult') is False
+        assert devices[1].get('is_katapult') is False
         # STM device should be unchanged
-        assert devices[1].get('is_katapult') is True
-        # No-profile device should be unchanged (no key set)
-        assert 'is_katapult' not in devices[2]
+        assert devices[2].get('is_katapult') is True
+        # No-profile device should retain the safe default
+        assert devices[3].get('is_katapult') is True
 
     def test_profiles_info_includes_is_avr(self, tmp_path):
         """get_profiles_info should include is_avr in profile metadata."""
