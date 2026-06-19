@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional, AsyncGenerator
+from typing import List, Dict, Any, Optional, AsyncGenerator, Tuple
 from urllib.parse import urlparse
 import os
 import asyncio
@@ -390,14 +390,141 @@ def resolve_firmware_path(profile_name: str, method: str) -> Optional[str]:
     return None
 
 
-def is_avr_profile(profile_name: str) -> bool:
-    """Check if a profile targets an AVR microcontroller."""
+def _read_profile_config(profile_name: str) -> Optional[str]:
+    """Returns the raw .config content for a profile, or None if unavailable."""
     config_path = os.path.join(PROFILES_DIR, f'{profile_name}.config')
     try:
         with open(config_path, 'r') as f:
-            return 'CONFIG_MACH_AVR=y' in f.read()
+            return f.read()
     except Exception:
+        return None
+
+
+def is_avr_profile(profile_name: str) -> bool:
+    """Check if a profile targets an AVR microcontroller."""
+    content = _read_profile_config(profile_name)
+    return content is not None and 'CONFIG_MACH_AVR=y' in content
+
+
+# MCU architectures that have no Katapult/serial bootloader and are written in
+# place with `make flash` (avrdude, bossac, ...). These never enter a "ready"
+# bootloader state, so for them "service" IS the flashable state.
+_DIRECT_FLASH_MARKERS = ('CONFIG_MACH_AVR=y', 'CONFIG_MACH_SAM=y')
+
+
+def _is_direct_flash_profile(profile_name: str) -> bool:
+    """Check if a profile targets an MCU that flashes directly (no bootloader)."""
+    content = _read_profile_config(profile_name)
+    if content is None:
         return False
+    return any(marker in content for marker in _DIRECT_FLASH_MARKERS)
+
+
+def resolve_flash_protocol(device: Dict[str, Any]) -> str:
+    """The fixed way a device receives firmware: 'linux', 'dfu', 'direct', or
+    'katapult'.
+
+    This is the *static* half of a device's state — it answers *how* to flash,
+    derived from the device's method and profile. It never says *whether* the
+    device is ready right now; that is is_flashable_now()'s job. Keeping the two
+    apart is what stops "service" from meaning different things per board type.
+    """
+    method = device.get('method')
+    if method == 'linux':
+        return 'linux'
+    if method == 'beacon':
+        return 'beacon'
+    if method == 'dfu':
+        return 'dfu'
+    if method == 'serial':
+        # Bridges always reach Katapult over their serial endpoint.
+        if device.get('is_bridge'):
+            return 'katapult'
+        # An explicit fleet flag is authoritative.
+        if device.get('is_katapult') is False:
+            return 'direct'
+        # Otherwise infer direct-flash MCUs (AVR, SAM) from the profile so older
+        # fleet entries that predate the is_katapult flag still classify right.
+        profile = device.get('profile')
+        if profile and _is_direct_flash_profile(profile):
+            return 'direct'
+        return 'katapult'
+    # CAN (and anything unexpected) goes through Katapult.
+    return 'katapult'
+
+
+def flashes_directly(device: Dict[str, Any]) -> bool:
+    """True when the device is written in place via `make flash` — no bootloader
+    reboot exists, so it flashes while still in 'service'."""
+    return resolve_flash_protocol(device) == 'direct'
+
+
+def is_flashable_now(status: str, device: Dict[str, Any]) -> bool:
+    """Whether firmware can be written to the device right now, given its live
+    mode.
+
+    A device is flashable when it is already sitting in a bootloader
+    ('ready'/'dfu'), or when it is a direct-flash board still in 'service' —
+    because for those boards 'service' is their flashable state (no bootloader
+    to reboot into). This is the single readiness gate for "Flash Ready".
+    """
+    if status in ('ready', 'dfu'):
+        return True
+    if status == 'service' and flashes_directly(device):
+        return True
+    return False
+
+
+def reboots_into_bootloader(action: str, device: Dict[str, Any]) -> bool:
+    """Whether a batch run will reboot this (non-bridge) device into a bootloader
+    before flashing.
+
+    Only "Flash All" reboots running MCUs; "Flash Ready" leaves them alone and
+    flashes only what is already in a flashable state. Direct-flash boards
+    (AVR/SAM) flash in place and never need a reboot."""
+    return (
+        'flash-all' in action
+        and not device.get('is_bridge')
+        and device['method'] in ('can', 'serial', 'dfu')
+        and not flashes_directly(device)
+    )
+
+
+def flashed_by_ready(status: str, device: Dict[str, Any]) -> bool:
+    """Whether "Flash Ready" will flash this device, judged from its current
+    (services-running) status.
+
+    Used to skip building firmware that won't be flashed. The Linux host MCU
+    always flashes (it becomes 'ready' once services stop); every other device
+    must already be in a flashable state (Flash Ready never reboots)."""
+    if device.get('method') == 'linux':
+        return True
+    return is_flashable_now(status, device)
+
+
+def reconcile_flash_status(rechecked: str, original: Optional[str]) -> str:
+    """Reconcile a post-service-stop re-check against the discovery status.
+
+    A device present at discovery doesn't vanish when we stop services to flash.
+    A running Klipper-mode CAN/serial MCU that wasn't rebooted into Katapult
+    becomes undetectable once Moonraker is down and re-checks as 'offline'. In
+    that case trust the discovery status so decisions and the summary reflect
+    the device's real state."""
+    if rechecked == 'offline' and original and original != 'offline':
+        return original
+    return rechecked
+
+
+def skip_reason(status: str, device: Dict[str, Any]) -> str:
+    """Human-readable reason a device was skipped during a batch flash, for the
+    summary. Mirrors is_flashable_now(): the only legitimate skips are offline
+    devices and Katapult devices still running Klipper that would need a reboot
+    into the bootloader first (i.e. Flash All's job)."""
+    if status == 'offline':
+        return 'offline / unreachable'
+    if status == 'service' and not flashes_directly(device):
+        return 'needs reboot — use Flash All'
+    return status
 
 
 def get_flash_offset(profile_name: str) -> str:
@@ -1058,6 +1185,8 @@ async def batch_operation(
         flash_results: Dict[
             str, str
         ] = {}  # device_name -> "SUCCESS"/"SKIPPED"/"FAILED"
+        # device_name -> (flash protocol, live status) for the summary table
+        flash_meta: Dict[str, Tuple[str, str]] = {}
 
         try:
             devices: List[Dict[str, Any]] = await fleet_mgr.get_fleet()
@@ -1075,11 +1204,55 @@ async def batch_operation(
                     if d.get('profile'):
                         key = (d['profile'], d.get('custom_make_command') or None)
                         builds_needed[key] = key[1]
+                had_profiles = bool(builds_needed)
+
+                # For "Flash Ready", only build profiles whose devices will
+                # actually be flashed. No point compiling firmware for Katapult
+                # MCUs in service, offline devices, or excluded ones — Flash
+                # Ready won't flash them without a reboot (that's Flash All).
+                # Services are still running here, so status checks are accurate.
+                if 'flash-ready' in action and builds_needed:
+                    ready_keys = set()
+                    for d in devices:
+                        if not d.get('profile') or d.get('exclude_from_batch'):
+                            continue
+                        if d.get('method') == 'linux':
+                            will_flash = True
+                        else:
+                            st = await flash_mgr.check_device_status(
+                                d['id'],
+                                d['method'],
+                                dfu_id=d.get('dfu_id'),
+                                is_bridge=d.get('is_bridge', False),
+                                interface=d.get('interface', 'can0'),
+                                serial_id=d.get('serial_id'),
+                            )
+                            will_flash = flashed_by_ready(st, d)
+                        if will_flash:
+                            ready_keys.add(
+                                (
+                                    d['profile'],
+                                    d.get('custom_make_command') or None,
+                                )
+                            )
+                    for key in list(builds_needed):
+                        if key not in ready_keys:
+                            task_store.add_log(
+                                task_id,
+                                f'>>> Skipping build for {key[0]} — not ready '
+                                f'to flash (use Flash All).\n',
+                            )
+                            del builds_needed[key]
+
                 if not builds_needed:
-                    task_store.add_log(
-                        task_id,
-                        '>>> No profiles assigned to fleet devices. Skipping build.\n',
+                    msg = (
+                        '>>> No ready devices to flash — nothing to build. '
+                        'Use Flash All to build and flash everything.\n'
+                        if had_profiles
+                        else '>>> No profiles assigned to fleet devices. '
+                        'Skipping build.\n'
                     )
+                    task_store.add_log(task_id, msg)
                 else:
                     for (profile, custom_cmd), _ in builds_needed.items():
                         if task_store.is_cancelled(task_id):
@@ -1141,17 +1314,25 @@ async def batch_operation(
                     )
                     for excl_dev in excluded_devices:
                         flash_results[excl_dev['name']] = 'EXCLUDED'
+                        flash_meta[excl_dev['name']] = (
+                            resolve_flash_protocol(excl_dev),
+                            '—',
+                        )
 
                 task_store.add_log(
                     task_id,
                     '>>> Checking device statuses before stopping services...\n',
                 )
 
-                # Auto-detect AVR profiles and override is_katapult for devices that target AVR MCUs.
-                # This ensures AVR devices (e.g. ATmega2560) are never sent through the Katapult path,
-                # even if the user hasn't explicitly set is_katapult: false in the fleet.
+                # Normalize direct-flash profiles (AVR, SAM) so they are never sent
+                # through the Katapult path, even if the user hasn't explicitly set
+                # is_katapult: false in the fleet. resolve_flash_protocol() infers the
+                # same thing from the profile, but stamping the flag keeps any direct
+                # is_katapult reads consistent too.
                 for dev in devices:
-                    if dev.get('profile') and is_avr_profile(dev['profile']):
+                    if dev.get('profile') and _is_direct_flash_profile(
+                        dev['profile']
+                    ):
                         dev['is_katapult'] = False
 
                 # Issue #16: Auto-correct method for USB-to-CAN bridges whose device_id
@@ -1211,16 +1392,13 @@ async def batch_operation(
 
                     if status == 'service':
                         # Reboot non-bridge devices that need bootloader entry.
-                        # Skip serial devices without Katapult (e.g. AVR boards) — they flash directly.
-                        # Bridges are handled in the second phase to avoid killing the CAN bus prematurely.
-                        needs_reboot = (
-                            not dev.get('is_bridge')
-                            and dev['method'] in ('can', 'serial', 'dfu')
-                            and not (
-                                dev['method'] == 'serial'
-                                and not dev.get('is_katapult', True)
-                            )
-                        )
+                        # Only "Flash All" reboots running MCUs into a bootloader;
+                        # "Flash Ready" leaves them alone and flashes only what is
+                        # already in a flashable state. Direct-flash devices
+                        # (AVR/SAM) flash in place and never need a reboot. Bridges
+                        # are handled in the second phase to avoid killing the CAN
+                        # bus prematurely.
+                        needs_reboot = reboots_into_bootloader(action, dev)
                         if needs_reboot:
                             reboot_tasks.append(
                                 {
@@ -1451,13 +1629,28 @@ async def batch_operation(
                         interface=dev.get('interface', 'can0'),
                         serial_id=dev.get('serial_id'),
                     )
+
+                    # Don't let a running MCU that's merely undetectable with
+                    # services stopped (e.g. an un-rebooted Klipper CAN node
+                    # under Flash Ready) be mistaken for offline.
+                    status = reconcile_flash_status(
+                        status,
+                        device_statuses.get(dev.get('fleet_id', dev['id'])),
+                    )
+
                     task_store.update_device_status(task_id, dev['id'], status)
+
+                    # Record protocol + live status for the summary table.
+                    flash_meta[dev['name']] = (
+                        resolve_flash_protocol(dev),
+                        status,
+                    )
 
                     should_flash = False
                     if 'flash-all' in action:
                         should_flash = True
-                    elif 'flash-ready' in action and status == 'ready':
-                        should_flash = True
+                    elif 'flash-ready' in action:
+                        should_flash = is_flashable_now(status, dev)
 
                     if should_flash:
                         # CAN bridge already in Katapult serial mode: switch to serial flash
@@ -1603,20 +1796,19 @@ async def batch_operation(
                                     )
                                     continue
 
-                        # Non-Katapult serial devices (e.g. AVR) flash directly without bootloader
-                        is_direct_serial = dev[
-                            'method'
-                        ] == 'serial' and not dev.get('is_katapult', True)
+                        # Direct-flash devices (e.g. AVR/SAM) flash in place without a bootloader
+                        is_direct_serial = flashes_directly(dev)
                         if (
                             status not in ['ready', 'dfu']
                             and dev['method'] != 'linux'
                             and not is_direct_serial
                         ):
+                            reason = skip_reason(status, dev)
                             task_store.add_log(
                                 task_id,
-                                f'!!! Skipping {dev["name"]} ({dev["id"]}) - Device is {status}, not ready for flashing.\n',
+                                f'!!! Skipping {dev["name"]} ({dev["id"]}) - {reason}.\n',
                             )
-                            flash_results[dev['name']] = f'SKIPPED ({status})'
+                            flash_results[dev['name']] = f'SKIPPED ({reason})'
                             continue
 
                         task_store.add_log(
@@ -1640,10 +1832,8 @@ async def batch_operation(
                         )
                         batch_flash_ok = False
                         try:
-                            if dev['method'] == 'serial' and not dev.get(
-                                'is_katapult', True
-                            ):
-                                # Non-Katapult serial device — flash via make flash (handles AVR, RP2040, etc.)
+                            if flashes_directly(dev):
+                                # Direct-flash device — flash via make flash (handles AVR, SAM, etc.)
                                 config_path: str = os.path.join(
                                     PROFILES_DIR, f'{dev["profile"]}.config'
                                 )
@@ -1784,11 +1974,12 @@ async def batch_operation(
                             )
                             flash_results[dev['name']] = 'FAILED'
                     else:
+                        reason = skip_reason(status, dev)
                         task_store.add_log(
                             task_id,
-                            f'>>> Skipping {dev["name"]} (Status: {status})\n',
+                            f'>>> Skipping {dev["name"]} ({reason})\n',
                         )
-                        flash_results[dev['name']] = 'SKIPPED'
+                        flash_results[dev['name']] = f'SKIPPED ({reason})'
 
                 task_store.add_log(task_id, '\n>>> BATCH FLASH COMPLETED <<<\n')
 
@@ -1814,25 +2005,51 @@ async def batch_operation(
                             f'  [COLOR:RED]  - {profile}: {result}[/COLOR]\n',
                         )
 
-            # Flash summary
+            # Flash summary — columnar: device, [protocol, status], result, reason.
+            # protocol = how the board flashes (direct/katapult/dfu/linux);
+            # status = its live mode when the flash ran (ready/service/dfu/offline).
             if flash_results:
                 task_store.add_log(task_id, '\n  FLASH RESULTS:\n')
-                for device_name, result in flash_results.items():
-                    if result == 'SUCCESS':
-                        task_store.add_log(
-                            task_id,
-                            f'  [COLOR:GREEN]  - {device_name}: {result}[/COLOR]\n',
-                        )
-                    elif result.startswith('SKIPPED') or result == 'EXCLUDED':
-                        task_store.add_log(
-                            task_id,
-                            f'  [COLOR:YELLOW]  - {device_name}: {result}[/COLOR]\n',
-                        )
+
+                def _meta_str(name: str) -> str:
+                    proto, st = flash_meta.get(name, ('—', '—'))
+                    return f'[{proto}, {st}]'
+
+                def _split_result(result: str) -> Tuple[str, str]:
+                    # "SKIPPED (reason)" / "FAILED (reason)" -> ("SKIPPED", "reason")
+                    if result.endswith(')') and '(' in result:
+                        i = result.index('(')
+                        return result[:i].strip(), result[i + 1:-1]
+                    if result == 'EXCLUDED':
+                        return 'EXCLUDED', 'excluded from batch'
+                    return result, ''
+
+                rows = [
+                    (n, _meta_str(n)) + _split_result(r)
+                    for n, r in flash_results.items()
+                ]
+                name_w = max([len(r[0]) for r in rows] + [len('DEVICE')])
+                meta_w = max(
+                    [len(r[1]) for r in rows] + [len('[PROTOCOL, STATUS]')]
+                )
+                res_w = max([len(r[2]) for r in rows] + [len('RESULT')])
+                task_store.add_log(
+                    task_id,
+                    f'      {"DEVICE":<{name_w}}   {"[PROTOCOL, STATUS]":<{meta_w}}'
+                    f'   {"RESULT":<{res_w}}   SKIP REASON\n',
+                )
+                for name, meta, res_word, reason in rows:
+                    line = (
+                        f'  - {name:<{name_w}}   {meta:<{meta_w}}   '
+                        f'{res_word:<{res_w}}   {reason}'
+                    ).rstrip()
+                    if res_word == 'SUCCESS':
+                        color = 'GREEN'
+                    elif res_word in ('SKIPPED', 'EXCLUDED'):
+                        color = 'YELLOW'
                     else:
-                        task_store.add_log(
-                            task_id,
-                            f'  [COLOR:RED]  - {device_name}: {result}[/COLOR]\n',
-                        )
+                        color = 'RED'
+                    task_store.add_log(task_id, f'  [COLOR:{color}]{line}[/COLOR]\n')
 
             task_store.add_log(
                 task_id,
@@ -2273,8 +2490,19 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                     exc_info=True,
                 )
 
-            # Auto-detect AVR from profile — override is_katapult if profile targets AVR
-            if is_avr_profile(req.profile):
+            # Resolve how this device flashes (static protocol) once, from the
+            # same logic the batch path uses. 'direct' devices (AVR/SAM) flash in
+            # place with `make flash` and never reboot into a bootloader.
+            flash_protocol = resolve_flash_protocol(
+                {
+                    'method': req.method,
+                    'profile': req.profile,
+                    'is_katapult': is_katapult,
+                    'is_bridge': is_bridge,
+                }
+            )
+            flashes_direct = flash_protocol == 'direct'
+            if flashes_direct:
                 is_katapult = False
 
             # Snapshot current serial devices BEFORE reboot (for diff-based detection)
@@ -2338,10 +2566,10 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                         if not found:
                             yield '!!! TIMEOUT: DFU device not found. Aborting flash.\n'
                             return
-                elif req.method == 'serial' and not is_katapult:
-                    # Non-Katapult serial device (e.g. AVR/ATmega) — no reboot needed.
-                    # Services are already stopped; avrdude will flash directly.
-                    yield f'>>> Serial device (no Katapult): Skipping bootloader reboot for {req.device_id}.\n'
+                elif flashes_direct:
+                    # Direct-flash device (e.g. AVR/SAM) — no reboot needed.
+                    # Services are already stopped; it will flash in place.
+                    yield f'>>> Direct-flash device: Skipping bootloader reboot for {req.device_id}.\n'
                 else:
                     yield f'>>> Rebooting {req.device_id} to Katapult mode...\n'
                     async for log in flash_mgr.reboot_to_katapult(
@@ -2351,17 +2579,13 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                             return
                         yield log
 
-                if req.method != 'linux' and not (
-                    req.method == 'serial' and not is_katapult
-                ):
+                if req.method != 'linux' and not flashes_direct:
                     yield '>>> Waiting for device to enter bootloader mode...\n'
                     await asyncio.sleep(2)  # Initial wait for USB bus to settle
 
                 # Active wait for bootloader (up to 30s) - check both DFU and new serial devices
-                # (Skip entirely for Linux MCU and non-Katapult serial devices - no bootloader transition needed)
-                skip_bootloader_wait = req.method == 'linux' or (
-                    req.method == 'serial' and not is_katapult
-                )
+                # (Skip entirely for Linux MCU and direct-flash devices - no bootloader transition needed)
+                skip_bootloader_wait = req.method == 'linux' or flashes_direct
                 for _ in range(30) if not skip_bootloader_wait else []:
                     if task_store.is_cancelled(task_id):
                         return
@@ -2492,8 +2716,8 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             task_store.update_device_status(task_id, req.device_id, 'flashing')
             flash_succeeded = False
             try:
-                if actual_method == 'serial' and not is_katapult:
-                    # Non-Katapult serial device — flash via make flash (handles AVR, RP2040, etc.)
+                if actual_method == 'serial' and flashes_direct:
+                    # Direct-flash device — flash via make flash (handles AVR, SAM, etc.)
                     config_path: str = os.path.join(
                         PROFILES_DIR, f'{req.profile}.config'
                     )

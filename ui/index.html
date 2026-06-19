@@ -235,6 +235,7 @@
                                     <option value="full">Fit Browser</option>
                                 </select>
                                 <button v-if="currentTaskId" @click="cancelTask" class="text-red-500 hover:text-red-400 font-bold">Cancel</button>
+                                <button @click="copyLogs" :class="logsCopied ? 'text-green-400' : 'text-gray-500 hover:text-white'" title="Copy logs as Markdown for GitHub">{{ logsCopied ? 'Copied!' : 'Copy' }}</button>
                                 <button @click="buildLogs = ''" class="text-gray-500 hover:text-white">Clear</button>
                             </div>
                         </div>
@@ -932,7 +933,7 @@
                             return `<span class="text-yellow-400">${line}</span>`;
                         }
                         // Section headers (cyan/blue)
-                        if (line.includes('=====') || line.includes('[SUMMARY]') || line.includes('BUILD RESULTS') || line.includes('FLASH RESULTS')) {
+                        if (line.includes('=====') || line.includes('[SUMMARY]') || line.includes('BUILD RESULTS') || line.includes('FLASH RESULTS') || line.includes('[PROTOCOL, STATUS]')) {
                             return `<span class="text-cyan-400">${line}</span>`;
                         }
                         // Phase markers (blue) - ">>> BATCH" or "<<< BATCH" 
@@ -1475,6 +1476,45 @@
                         buildLogs.value += `>>> Cancellation requested...\n`;
                     } catch (e) {
                         buildLogs.value += `!!! Failed to cancel: ${e.message}\n`;
+                    }
+                };
+
+                const logsCopied = ref(false);
+                const copyLogs = async () => {
+                    // Clean internal color markers and wrap as a GitHub-ready
+                    // fenced code block so it pastes neatly into issues/PRs.
+                    const clean = buildLogs.value
+                        .replace(/\[COLOR:[A-Z]+\]/g, '')
+                        .replace(/\[\/COLOR\]/g, '')
+                        .replace(/[ \t]+$/gm, '')
+                        .replace(/\s+$/, '');
+                    if (!clean) return;
+                    const md = '```\n' + clean + '\n```';
+                    let ok = false;
+                    try {
+                        if (navigator.clipboard && window.isSecureContext) {
+                            await navigator.clipboard.writeText(md);
+                            ok = true;
+                        }
+                    } catch (e) { /* fall back to execCommand below */ }
+                    if (!ok) {
+                        // http:// (non-secure) contexts block the async clipboard API,
+                        // which is how KlipperFleet is normally served — use a hidden
+                        // textarea + execCommand as a fallback.
+                        const ta = document.createElement('textarea');
+                        ta.value = md;
+                        ta.style.position = 'fixed';
+                        ta.style.top = '-1000px';
+                        ta.style.opacity = '0';
+                        document.body.appendChild(ta);
+                        ta.focus();
+                        ta.select();
+                        try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+                        document.body.removeChild(ta);
+                    }
+                    if (ok) {
+                        logsCopied.value = true;
+                        setTimeout(() => { logsCopied.value = false; }, 1500);
                     }
                 };
 
@@ -2145,7 +2185,7 @@
 
                 return { 
                     view, sidebarOpen, configTree, profiles, fleet, selectedProfile, loading, building, flashing, updating, querying, printing, printState, printFilename,
-                    buildLogs, formattedLogs, expandLogs, expandLogsHeight, updateValue, saveProfile, saveProfileAs, newProfile, deleteProfile, renameProfile, loadProfile, createMissingProfile, startBuild, runBatch, selfUpdate,
+                    buildLogs, formattedLogs, expandLogs, expandLogsHeight, copyLogs, logsCopied, updateValue, saveProfile, saveProfileAs, newProfile, deleteProfile, renameProfile, loadProfile, createMissingProfile, startBuild, runBatch, selfUpdate,
                     devices, selectedDevice, discoverDevices, startFlash, quickFlash, quickBuild, quickFlashOnly, flashBeacon, beaconUpToDate, buildAndDownload, rebootDevice, statusColor, formatStatus,
                     addDeviceToFleet, attachToFleet, updateFleetDevice, onDeviceProfileChange, removeDeviceFromFleet, error, modifiedValues, formatNotes,
                     printerUrl, printerTitle, hasReferrer, profileInfo, isProfileCanBridge, isProfileLinux,
