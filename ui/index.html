@@ -101,16 +101,16 @@
                     </span>
                 </div>
                 <div v-if="view === 'dashboard'" class="flex items-center space-x-1.5 md:space-x-2 mt-1.5 md:mt-0 overflow-x-auto pb-1 md:pb-0 -mx-1 px-1">
-                    <button @click="runBatch('build-all')" :disabled="building || flashing" class="bg-gray-700 hover:bg-gray-600 text-white px-2 md:px-3 py-1 rounded text-[9px] md:text-[10px] font-bold disabled:opacity-50 uppercase whitespace-nowrap flex-none">
+                    <button @click="runBatch('build-all')" :disabled="building || flashing" title="Compile firmware for every fleet device. Does not flash anything." class="bg-gray-700 hover:bg-gray-600 text-white px-2 md:px-3 py-1 rounded text-[9px] md:text-[10px] font-bold disabled:opacity-50 uppercase whitespace-nowrap flex-none">
                         Build All
                     </button>
-                    <button @click="runBatch('flash-all')" :disabled="building || flashing || printing" class="bg-gray-700 hover:bg-gray-600 text-white px-2 md:px-3 py-1 rounded text-[9px] md:text-[10px] font-bold disabled:opacity-50 uppercase whitespace-nowrap flex-none">
+                    <button @click="runBatch('flash-all')" :disabled="building || flashing || printing" title="Reboot every reachable device into its bootloader and flash it (uses existing firmware; does not build first)." class="bg-gray-700 hover:bg-gray-600 text-white px-2 md:px-3 py-1 rounded text-[9px] md:text-[10px] font-bold disabled:opacity-50 uppercase whitespace-nowrap flex-none">
                         Flash All
                     </button>
-                    <button @click="runBatch('build-flash-ready')" :disabled="building || flashing || printing" class="bg-orange-600 hover:bg-orange-700 text-white px-2 md:px-3 py-1 rounded text-[9px] md:text-[10px] font-bold disabled:opacity-50 uppercase whitespace-nowrap flex-none">
-                        Build & Flash Ready
+                    <button @click="runBatch('build-flash-ready')" :disabled="building || flashing || printing" title="Build, then flash only devices that can update without a reboot: boards already in a bootloader (Katapult/DFU), direct-flash USB/serial boards, and the host MCU. Running Katapult/CAN MCUs are left alone (use Build & Flash All for those)." class="bg-orange-600 hover:bg-orange-700 text-white px-2 md:px-3 py-1 rounded text-[9px] md:text-[10px] font-bold disabled:opacity-50 uppercase whitespace-nowrap flex-none">
+                        Build & Flash (No Reboot)
                     </button>
-                    <button @click="runBatch('build-flash-all')" :disabled="building || flashing || printing" class="bg-red-700 hover:bg-red-800 text-white px-2 md:px-3 py-1 rounded text-[9px] md:text-[10px] font-bold disabled:opacity-50 uppercase whitespace-nowrap flex-none">
+                    <button @click="runBatch('build-flash-all')" :disabled="building || flashing || printing" title="Build, then reboot every reachable device into its bootloader and flash all of them." class="bg-red-700 hover:bg-red-800 text-white px-2 md:px-3 py-1 rounded text-[9px] md:text-[10px] font-bold disabled:opacity-50 uppercase whitespace-nowrap flex-none">
                         Build & Flash All
                     </button>
                 </div>
