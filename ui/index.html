@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>KlipperFleet</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
     <link rel="stylesheet" href="/tailwind.built.css">
     <link rel="stylesheet" href="/vendor/fa/css/all.min.css">
@@ -71,7 +72,7 @@
                     Using system kconfiglib. Please click Update to switch to {{ firmwareName }}'s version for full compatibility.
                 </div>
                 <div class="flex items-center text-[10px] text-gray-500">
-                    <span>v1.3.2-alpha</span>
+                    <span>v1.4.0-alpha</span>
                     <span v-if="currentBranch && currentBranch !== 'main'" class="ml-1 text-yellow-500">({{ currentBranch }})</span>
                     <span v-if="currentCommit" class="ml-auto text-gray-600">{{ currentCommit }}</span>
                 </div>
@@ -101,16 +102,16 @@
                     </span>
                 </div>
                 <div v-if="view === 'dashboard'" class="flex items-center space-x-1.5 md:space-x-2 mt-1.5 md:mt-0 overflow-x-auto pb-1 md:pb-0 -mx-1 px-1">
-                    <button @click="runBatch('build-all')" :disabled="building || flashing" class="bg-gray-700 hover:bg-gray-600 text-white px-2 md:px-3 py-1 rounded text-[9px] md:text-[10px] font-bold disabled:opacity-50 uppercase whitespace-nowrap flex-none">
+                    <button @click="runBatch('build-all')" :disabled="building || flashing" title="Compile firmware for every fleet device. Does not flash anything." class="bg-gray-700 hover:bg-gray-600 text-white px-2 md:px-3 py-1 rounded text-[9px] md:text-[10px] font-bold disabled:opacity-50 uppercase whitespace-nowrap flex-none">
                         Build All
                     </button>
-                    <button @click="runBatch('flash-all')" :disabled="building || flashing || printing" class="bg-gray-700 hover:bg-gray-600 text-white px-2 md:px-3 py-1 rounded text-[9px] md:text-[10px] font-bold disabled:opacity-50 uppercase whitespace-nowrap flex-none">
+                    <button @click="runBatch('flash-all')" :disabled="building || flashing || printing" title="Reboot every reachable device into its bootloader and flash it (uses existing firmware; does not build first)." class="bg-gray-700 hover:bg-gray-600 text-white px-2 md:px-3 py-1 rounded text-[9px] md:text-[10px] font-bold disabled:opacity-50 uppercase whitespace-nowrap flex-none">
                         Flash All
                     </button>
-                    <button @click="runBatch('build-flash-ready')" :disabled="building || flashing || printing" class="bg-orange-600 hover:bg-orange-700 text-white px-2 md:px-3 py-1 rounded text-[9px] md:text-[10px] font-bold disabled:opacity-50 uppercase whitespace-nowrap flex-none">
-                        Build & Flash Ready
+                    <button @click="runBatch('build-flash-ready')" :disabled="building || flashing || printing" title="Build, then flash only devices that can update without a reboot: boards already in a bootloader (Katapult/DFU), direct-flash USB/serial boards, and the host MCU. Running Katapult/CAN MCUs are left alone (use Build & Flash All for those)." class="bg-orange-600 hover:bg-orange-700 text-white px-2 md:px-3 py-1 rounded text-[9px] md:text-[10px] font-bold disabled:opacity-50 uppercase whitespace-nowrap flex-none">
+                        Build & Flash (No Reboot)
                     </button>
-                    <button @click="runBatch('build-flash-all')" :disabled="building || flashing || printing" class="bg-red-700 hover:bg-red-800 text-white px-2 md:px-3 py-1 rounded text-[9px] md:text-[10px] font-bold disabled:opacity-50 uppercase whitespace-nowrap flex-none">
+                    <button @click="runBatch('build-flash-all')" :disabled="building || flashing || printing" title="Build, then reboot every reachable device into its bootloader and flash all of them." class="bg-red-700 hover:bg-red-800 text-white px-2 md:px-3 py-1 rounded text-[9px] md:text-[10px] font-bold disabled:opacity-50 uppercase whitespace-nowrap flex-none">
                         Build & Flash All
                     </button>
                 </div>
@@ -235,6 +236,7 @@
                                     <option value="full">Fit Browser</option>
                                 </select>
                                 <button v-if="currentTaskId" @click="cancelTask" class="text-red-500 hover:text-red-400 font-bold">Cancel</button>
+                                <button @click="copyLogs" :class="logsCopied ? 'text-green-400' : 'text-gray-500 hover:text-white'" title="Copy logs as Markdown for GitHub">{{ logsCopied ? 'Copied!' : 'Copy' }}</button>
                                 <button @click="buildLogs = ''" class="text-gray-500 hover:text-white">Clear</button>
                             </div>
                         </div>
@@ -247,7 +249,10 @@
 
                 <!-- Configurator View -->
                 <div v-if="view === 'configurator'" class="flex-1 overflow-y-auto grid grid-cols-1 lg:grid-cols-4 gap-4 md:gap-8 pr-0 md:pr-2">
-                    <div class="lg:col-span-3 mainsail-card rounded-lg p-3 md:p-6">
+                    <div class="lg:col-span-3 mainsail-card rounded-lg p-3 md:p-6 relative">
+                        <div v-if="refreshing" class="absolute top-2 right-3 flex items-center text-[10px] text-blue-400 z-10">
+                            <i class="fas fa-circle-notch fa-spin mr-1"></i> Updating...
+                        </div>
                         <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-4 md:mb-6 gap-3 sm:gap-0">
                             <div class="flex flex-wrap items-center gap-2">
                                 <button @click="newProfile" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded text-sm font-bold flex items-center transition-colors" title="Start New Profile">
@@ -818,18 +823,34 @@
         const KconfigNode = {
             name: 'kconfig-node',
             props: ['node', 'showRawSymbolNames'],
+            data() {
+                return { collapsed: false };
+            },
+            computed: {
+                // Nodes that render nested options get a collapse toggle so long
+                // sections (LCD chips, accelerometers, etc.) can be folded away.
+                hasSection() {
+                    return this.node.children && this.node.type !== 'choice' && this.node.children.length > 0;
+                }
+            },
             template: `
                 <div v-if="node.visible" class="mb-1 kconfig-item">
                     <div class="flex items-center justify-between p-2 hover:bg-gray-800/80 bg-gray-900/20 rounded border border-gray-800/50 group transition-colors">
                         <div class="flex items-center space-x-3 flex-1 min-w-0">
+                            <!-- Section collapse toggle -->
+                            <button v-if="hasSection" @click="collapsed = !collapsed"
+                                    :title="collapsed ? 'Expand section' : 'Collapse section'"
+                                    class="flex-none w-4 text-gray-500 hover:text-gray-200 transition-colors">
+                                <i class="fas text-xs" :class="collapsed ? 'fa-chevron-right' : 'fa-chevron-down'"></i>
+                            </button>
                             <!-- Boolean -->
-                            <input v-if="node.type === 'bool'" type="checkbox" 
+                            <input v-if="node.type === 'bool'" type="checkbox"
                                    :checked="node.value === 'y'" 
                                    :disabled="node.readonly"
                                    @change="$emit('update', node.name, $event.target.checked ? 'y' : 'n')"
                                    class="h-5 w-5 md:h-4 md:w-4 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500 disabled:opacity-50 flex-none">
                             
-                            <div class="flex flex-col min-w-0">
+                            <div class="flex flex-col min-w-0" :class="hasSection ? 'cursor-pointer' : ''" @click="hasSection && (collapsed = !collapsed)">
                                 <span class="text-sm" :class="[node.type === 'menu' ? 'font-bold text-blue-400' : 'text-gray-100', node.readonly ? 'opacity-50' : '']">
                                     {{ node.prompt }}
                                 </span>
@@ -858,8 +879,8 @@
                     
                     <p v-if="node.help" class="text-[10px] text-gray-300 mt-1 ml-8 max-w-2xl leading-relaxed italic opacity-90">{{ node.help }}</p>
 
-                    <!-- Only show children if NOT a choice (to avoid redundant checkboxes) -->
-                    <div v-if="node.children && node.type !== 'choice'" class="kconfig-menu mt-1 ml-4 border-l border-gray-800 pl-2">
+                    <!-- Only show children if NOT a choice (to avoid redundant checkboxes) and not collapsed -->
+                    <div v-if="hasSection && !collapsed" class="kconfig-menu mt-1 ml-4 border-l border-gray-800 pl-2">
                         <kconfig-node v-for="child in node.children" :key="child.name || child.prompt" :node="child" :show-raw-symbol-names="showRawSymbolNames" @update="(n, v) => $emit('update', n, v)"></kconfig-node>
                     </div>
                 </div>
@@ -881,6 +902,7 @@
                 const firmwareName = ref('Klipper');
                 const selectedProfile = ref(localStorage.getItem('kf_profile') || '');
                 const loading = ref(false);
+                const refreshing = ref(false);
                 const building = ref(false);
                 const flashing = ref(false);
                 const updating = ref(false);
@@ -932,7 +954,7 @@
                             return `<span class="text-yellow-400">${line}</span>`;
                         }
                         // Section headers (cyan/blue)
-                        if (line.includes('=====') || line.includes('[SUMMARY]') || line.includes('BUILD RESULTS') || line.includes('FLASH RESULTS')) {
+                        if (line.includes('=====') || line.includes('[SUMMARY]') || line.includes('BUILD RESULTS') || line.includes('FLASH RESULTS') || line.includes('[PROTOCOL, STATUS]')) {
                             return `<span class="text-cyan-400">${line}</span>`;
                         }
                         // Phase markers (blue) - ">>> BATCH" or "<<< BATCH" 
@@ -1020,11 +1042,18 @@
                 watch(showRawSymbolNames, (v) => localStorage.setItem('kf_show_raw_symbols', v));
                 watch(showOptionalFeatures, (v) => {
                     localStorage.setItem('kf_show_optional', v);
-                    fetchTree(selectedProfile.value);
+                    fetchTree(selectedProfile.value, { silent: true });
                 });
 
-                const fetchTree = async (profile = '') => {
-                    loading.value = true;
+                // silent: keep the current tree rendered and refresh it in place
+                // (used for dependency/visibility recomputes after an edit) instead
+                // of blanking the whole panel with the full-page spinner.
+                const fetchTree = async (profile = '', { silent = false } = {}) => {
+                    if (silent) {
+                        refreshing.value = true;
+                    } else {
+                        loading.value = true;
+                    }
                     error.value = null;
                     try {
                         const values = Object.entries(modifiedValues.value).map(([name, value]) => ({ name, value }));
@@ -1044,9 +1073,12 @@
                         configTree.value = await res.json();
                     } catch (e) {
                         console.error(e);
-                        error.value = e.message;
+                        // On a silent refresh, keep the existing tree visible rather
+                        // than replacing it with a full-panel error.
+                        if (!silent) error.value = e.message;
                     } finally {
                         loading.value = false;
+                        refreshing.value = false;
                     }
                 };
 
@@ -1283,10 +1315,11 @@
                     };
                     updateNode(configTree.value);
 
-                    // Debounced refresh for visibility/dependencies
+                    // Debounced refresh for visibility/dependencies, done in place
+                    // so the tree stays put instead of flashing the full spinner.
                     clearTimeout(updateTimeout);
                     updateTimeout = setTimeout(() => {
-                        fetchTree(selectedProfile.value);
+                        fetchTree(selectedProfile.value, { silent: true });
                     }, 500);
                 };
 
@@ -1475,6 +1508,45 @@
                         buildLogs.value += `>>> Cancellation requested...\n`;
                     } catch (e) {
                         buildLogs.value += `!!! Failed to cancel: ${e.message}\n`;
+                    }
+                };
+
+                const logsCopied = ref(false);
+                const copyLogs = async () => {
+                    // Clean internal color markers and wrap as a GitHub-ready
+                    // fenced code block so it pastes neatly into issues/PRs.
+                    const clean = buildLogs.value
+                        .replace(/\[COLOR:[A-Z]+\]/g, '')
+                        .replace(/\[\/COLOR\]/g, '')
+                        .replace(/[ \t]+$/gm, '')
+                        .replace(/\s+$/, '');
+                    if (!clean) return;
+                    const md = '```\n' + clean + '\n```';
+                    let ok = false;
+                    try {
+                        if (navigator.clipboard && window.isSecureContext) {
+                            await navigator.clipboard.writeText(md);
+                            ok = true;
+                        }
+                    } catch (e) { /* fall back to execCommand below */ }
+                    if (!ok) {
+                        // http:// (non-secure) contexts block the async clipboard API,
+                        // which is how KlipperFleet is normally served — use a hidden
+                        // textarea + execCommand as a fallback.
+                        const ta = document.createElement('textarea');
+                        ta.value = md;
+                        ta.style.position = 'fixed';
+                        ta.style.top = '-1000px';
+                        ta.style.opacity = '0';
+                        document.body.appendChild(ta);
+                        ta.focus();
+                        ta.select();
+                        try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+                        document.body.removeChild(ta);
+                    }
+                    if (ok) {
+                        logsCopied.value = true;
+                        setTimeout(() => { logsCopied.value = false; }, 1500);
                     }
                 };
 
@@ -2144,8 +2216,8 @@
                 };
 
                 return { 
-                    view, sidebarOpen, configTree, profiles, fleet, selectedProfile, loading, building, flashing, updating, querying, printing, printState, printFilename,
-                    buildLogs, formattedLogs, expandLogs, expandLogsHeight, updateValue, saveProfile, saveProfileAs, newProfile, deleteProfile, renameProfile, loadProfile, createMissingProfile, startBuild, runBatch, selfUpdate,
+                    view, sidebarOpen, configTree, profiles, fleet, selectedProfile, loading, refreshing, building, flashing, updating, querying, printing, printState, printFilename,
+                    buildLogs, formattedLogs, expandLogs, expandLogsHeight, copyLogs, logsCopied, updateValue, saveProfile, saveProfileAs, newProfile, deleteProfile, renameProfile, loadProfile, createMissingProfile, startBuild, runBatch, selfUpdate,
                     devices, selectedDevice, discoverDevices, startFlash, quickFlash, quickBuild, quickFlashOnly, flashBeacon, beaconUpToDate, buildAndDownload, rebootDevice, statusColor, formatStatus,
                     addDeviceToFleet, attachToFleet, updateFleetDevice, onDeviceProfileChange, removeDeviceFromFleet, error, modifiedValues, formatNotes,
                     printerUrl, printerTitle, hasReferrer, profileInfo, isProfileCanBridge, isProfileLinux,
