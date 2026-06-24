@@ -7,6 +7,10 @@
 
 KlipperFleet is a web interface (integrated into Mainsail) for configuring, building, and flashing Klipper/Kalico firmware across all MCUs on a printer. No command line needed.
 
+![Build & Flash All demo](images/demo.gif)
+
+*One click builds and flashes every MCU on the printer - CAN nodes, CAN bridge, and host - in the right order, with live logs.*
+
 ## Features
 
 - **Web Configurator**: Replaces `make menuconfig` with a reactive web form parsed from Klipper's Kconfig source.
@@ -22,37 +26,56 @@ KlipperFleet is a web interface (integrated into Mainsail) for configuring, buil
 
 ## Tested Hardware
 
+<details>
+<summary>Expand the list of reported boards</summary>
+
 > [!IMPORTANT]
 > All other hardware should be considered **untested**. Please [open an issue](https://github.com/JohnBaumb/KlipperFleet/issues) if you run into problems, or share your results in the [compatibility thread](https://github.com/JohnBaumb/KlipperFleet/discussions/2).
 
-| MCU / Board | Connection | Bootloader | Offset | Reported By |
-|-------------|------------|------------|--------|-------------|
-| Raspberry Pi | Linux | N/A | N/A | Developer, Community |
-| Spider 3 H7 (H723) | CAN / CAN Bridge | Katapult | 8KiB | Developer |
-| BTT MMBCAN v1 | CAN | Katapult | 8KiB | Developer |
-| Spider 3 (F446) | DFU (USB) | STM32 DFU | 32KiB | Developer |
-| BTT EBB36 Gen2 | CAN | Katapult | 8KiB | Community |
-| BTT EBB36 v1.2 | CAN | Katapult | 8KiB | Community |
-| BTT Kraken | CAN | Katapult | 128KiB | Community |
-| QIDI Plus 4 Mainboard | USB | Katapult | 32KiB | Community |
-| QIDI Plus 4 Toolhead | USB to UART | Katapult | 8KiB | Community |
-| QIDI Box v2 | USB | Katapult | 32KiB | Community |
-| ToquesCAN | CAN | Katapult | 8KiB | Community |
-| Fysetc Spider V2.2 | UART | Katapult | 32KiB | Community |
+| MCU / Board | Connection | Bootloader | Offset |
+|-------------|------------|------------|--------|
+| Raspberry Pi | Linux | N/A | N/A |
+| Spider 3 H7 (H723) | CAN / CAN Bridge | Katapult | 8KiB |
+| Spider 3 (F446) | DFU (USB) | STM32 DFU | 32KiB |
+| Fysetc Spider V2.2 | UART | Katapult | 32KiB |
+| Mellow Super 8 Pro (H723) | USB CAN Bridge | Katapult | 128KiB |
+| BTT Manta M8P v2 | USB CAN Bridge | Katapult | 128KiB |
+| BTT SKRat 1.0 | USB CAN Bridge | Katapult | 8KiB |
+| Fysetc Hexa Distro Fusion | USB CAN Bridge | Katapult | 8KiB |
+| Sovol Zero (H750 + F103) | USB CAN Bridge | Katapult | - |
+| BTT Octopus v1.1 | USB | STM32 DFU | 32KiB |
+| BTT Kraken | CAN | Katapult | 128KiB |
+| BTT MMBCAN v1 (G0B1) | CAN | Katapult | 8KiB |
+| BTT EBB36 Gen2 | CAN | Katapult | 8KiB |
+| BTT EBB36 v1.2 | CAN | Katapult | 8KiB |
+| BTT EBB42 v1.2 | CAN | Katapult | 8KiB |
+| Fysetc H36 v1.3 | CAN | Katapult | 8KiB |
+| Mellow Fly SB2040v3 | CAN | Katapult | 16KiB |
+| Mellow ADXL345 (RP2040) | USB | Katapult | 16KiB |
+| AFC Lite 1.0 | CAN | Katapult | 128KiB |
+| ToquesCAN | CAN | Katapult | 8KiB |
+| StrideMax | CAN | Katapult | 16KiB |
+| sht36v2 | CAN | Katapult | 8KiB |
+| QIDI Plus 4 Mainboard | USB | Katapult | 32KiB |
+| QIDI Plus 4 Toolhead | USB to UART | Katapult | 8KiB |
+| QIDI Box v2 | USB | Katapult | 32KiB |
+| Fysetc ERB 2.0 (RP2040) | USB | No bootloader (USBSERIAL) | - |
+| Voron V0 Display | USB | STM32 DFU (manual) | - |
+
+</details>
 
 ## Screenshots
 
-### Dashboard
-![Dashboard](images/dashboard.png)
+<details>
+<summary>Expand screenshots</summary>
 
-### Configurator
-![Configurator](images/configurator.png)
+| Dashboard | Configurator |
+|-----------|--------------|
+| ![Dashboard](images/dashboard.png) | ![Configurator](images/configurator.png) |
+| **Fleet Manager** | **Backup & Restore** |
+| ![Fleet Manager](images/fleet_manager.png) | ![Backup & Restore](images/backup_restore.png) |
 
-### Fleet Manager
-![Fleet Manager](images/fleet_manager.png)
-
-### Backup & Restore
-![Backup & Restore](images/backup_restore.png)
+</details>
 
 ## Prerequisites
 
@@ -68,8 +91,9 @@ Run this one-liner on your Raspberry Pi:
 wget -qO - https://raw.githubusercontent.com/JohnBaumb/KlipperFleet/main/install.sh | sudo bash
 ```
 
-### Manual Installation
-If you prefer to clone manually:
+<details>
+<summary>Manual installation</summary>
+
 ```bash
 cd ~
 git clone https://github.com/JohnBaumb/KlipperFleet.git
@@ -77,12 +101,12 @@ cd KlipperFleet
 sudo chmod +x install.sh
 sudo ./install.sh
 ```
+</details>
 
 ## Moonraker Integration
 
 Add the following to `moonraker.conf`:
 
-### Update Manager
 ```conf
 [update_manager klipperfleet]
 type: git_repo
@@ -96,11 +120,12 @@ system_dependencies: install_scripts/system-dependencies.json
 is_system_service: False
 ```
 
-### Mainsail Sidebar Tab
-The installer auto-configures `.theme/navi.json`. If the entry is missing, add it manually:
+The installer auto-configures the Mainsail sidebar tab via `.theme/navi.json`.
 
-> [!TIP]
-> Enable **Show Hidden Files** in Mainsail settings to see the `.theme` folder.
+<details>
+<summary>Manual sidebar entry (if the tab is missing)</summary>
+
+Enable **Show Hidden Files** in Mainsail settings to see the `.theme` folder, then add:
 
 ```json
 [
@@ -113,14 +138,21 @@ The installer auto-configures `.theme/navi.json`. If the entry is missing, add i
   }
 ]
 ```
+</details>
 
 ## Usage
 
 1. **Configurator** - Select a profile, configure MCU settings, click **Save**.
 2. **Fleet Manager** - Scan for devices, add them to your fleet, assign profiles. Use **Attach** to link DFU IDs to Serial devices for cross-reboot tracking.
-3. **Dashboard** - **Build All** compiles firmware, **Flash Ready** flashes bootloader-ready devices, **Flash All** reboots and flashes everything, **Build & Flash All** does it all in one click.
+3. **Dashboard** - **Build All** compiles firmware, **Flash Ready** flashes everything already in a flashable state (bootloader-ready, DFU, or direct-flash) without rebooting running devices, **Flash All** reboots and flashes everything, **Build & Flash All** does it all in one click.
+
+> [!NOTE]
+> Use **Backup & Restore** (sidebar) to export your fleet registry and profiles as a ZIP, or import one after a fresh install. CAN UUIDs and stable serial paths carry over automatically; if you change USB ports, update the serial paths in the Fleet Manager. Rebuild firmware from the Dashboard afterward to regenerate artifacts.
 
 ## Technical Details
+
+<details>
+<summary>Expand technical details</summary>
 
 | Component | Technology |
 |-----------|------------|
@@ -129,38 +161,28 @@ The installer auto-configures `.theme/navi.json`. If the entry is missing, add i
 | Frontend | Vue.js 3, Tailwind CSS |
 | Flashing | Katapult `flashtool.py`, `dfu-util`, `avrdude` |
 
-### Flash Method Reference
+Data lives in `~/printer_data/config/klipperfleet/`: `profiles/` (Kconfig files), `artifacts/` (compiled firmware), `fleet.json` (device registry).
 
-| Device Type | Method | Reboot Technique | Flash Tool | Firmware Format | ID Type |
-|-------------|--------|------------------|------------|-----------------|--------|
+**Flash method reference**
+
+| Device Type | Method | Reboot Technique | Flash Tool | Format | ID Type |
+|-------------|--------|------------------|------------|--------|---------|
 | CAN Node | `can` | `flashtool.py -r` via CAN | `flashtool.py -f` via CAN | `.bin` | UUID (12 hex chars) |
 | Serial + Katapult | `serial` | 1200bps trick -> flashtool.py -r | `flashtool.py -f -d` via serial | `.bin` | `/dev/serial/by-id/...` |
 | Serial AVR (no Katapult) | `serial` | None (direct flash) | `make flash` (avrdude) | `.elf` | `/dev/ttyUSB0` etc |
 | DFU (STM32) | `dfu` | 1200bps trick or manual | `dfu-util` | `.bin` | Serial number or USB path |
 | Linux Process | `linux` | None | `cp` + service restart | `.elf` | `linux_process` |
+| Beacon Probe | `beacon` | None (handled by script) | `update_firmware.py` (beacon_klipper) | firmware | `/dev/serial/by-id/*Beacon*` |
 | CAN Bridge (Katapult) | `can`->`serial` | 1200bps trick or flashtool.py -r | `flashtool.py -f -d` via serial | `.bin` | UUID -> `/dev/serial/by-id/...` |
 | CAN Bridge (DFU) | `can`->`dfu` | 1200bps trick | `dfu-util` | `.bin` | UUID -> DFU serial/path |
-
-### Data Directory
-
-Stored in `~/printer_data/config/klipperfleet/`: `profiles/` (Kconfig files), `artifacts/` (compiled firmware), `fleet.json` (device registry).
-
-## Backup & Restore
-
-KlipperFleet includes a built-in backup system accessible from the sidebar. Use it to export your fleet registry and all Kconfig profiles as a timestamped ZIP archive, or import a previous backup to restore after a fresh install.
-
-- **Export**: Downloads a ZIP containing `fleet.json`, all profiles, and metadata (version + date).
-- **Import**: Upload a previously exported ZIP to restore your fleet and profiles in one click.
-
-After restoring on a new system, rebuild firmware from the Dashboard to regenerate binary artifacts.
-
-> [!NOTE]
-> CAN UUIDs are hardware-specific and carry over automatically. Serial paths (`/dev/serial/by-id/...`) are stable across OS reinstalls as long as the same USB ports and boards are used. If you change USB ports, update the serial paths in the Fleet Manager.
+</details>
 
 ## Roadmap
 
 - Enhanced DFU handling and bridge recovery
-- User wiki with setup guides and troubleshooting, Profile import/export for easy setup of new devices.
-- Fluidd support (confirmed working by adding the Moonraker update manager entry, but no Fluidd sidebar integration yet)
+- Per Device Profile Import/Export
+- User wiki with setup guides and troubleshooting
+- Fluidd sidebar integration (already works by adding the Moonraker update manager entry)
+
 ## License
 GPLv3
