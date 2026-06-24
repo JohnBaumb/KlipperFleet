@@ -26,11 +26,11 @@ KlipperFleet is a web interface (integrated into Mainsail) for configuring, buil
 
 ## Tested Hardware
 
-<details>
-<summary>Expand the list of reported boards</summary>
-
 > [!IMPORTANT]
 > All other hardware should be considered **untested**. Please [open an issue](https://github.com/JohnBaumb/KlipperFleet/issues) if you run into problems, or share your results in the [compatibility thread](https://github.com/JohnBaumb/KlipperFleet/discussions/2).
+
+<details>
+<summary>Expand the list of reported boards</summary>
 
 | MCU / Board | Connection | Bootloader | Offset |
 |-------------|------------|------------|--------|
