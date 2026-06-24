@@ -248,7 +248,10 @@
 
                 <!-- Configurator View -->
                 <div v-if="view === 'configurator'" class="flex-1 overflow-y-auto grid grid-cols-1 lg:grid-cols-4 gap-4 md:gap-8 pr-0 md:pr-2">
-                    <div class="lg:col-span-3 mainsail-card rounded-lg p-3 md:p-6">
+                    <div class="lg:col-span-3 mainsail-card rounded-lg p-3 md:p-6 relative">
+                        <div v-if="refreshing" class="absolute top-2 right-3 flex items-center text-[10px] text-blue-400 z-10">
+                            <i class="fas fa-circle-notch fa-spin mr-1"></i> Updating...
+                        </div>
                         <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-4 md:mb-6 gap-3 sm:gap-0">
                             <div class="flex flex-wrap items-center gap-2">
                                 <button @click="newProfile" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded text-sm font-bold flex items-center transition-colors" title="Start New Profile">
@@ -819,18 +822,34 @@
         const KconfigNode = {
             name: 'kconfig-node',
             props: ['node', 'showRawSymbolNames'],
+            data() {
+                return { collapsed: false };
+            },
+            computed: {
+                // Nodes that render nested options get a collapse toggle so long
+                // sections (LCD chips, accelerometers, etc.) can be folded away.
+                hasSection() {
+                    return this.node.children && this.node.type !== 'choice' && this.node.children.length > 0;
+                }
+            },
             template: `
                 <div v-if="node.visible" class="mb-1 kconfig-item">
                     <div class="flex items-center justify-between p-2 hover:bg-gray-800/80 bg-gray-900/20 rounded border border-gray-800/50 group transition-colors">
                         <div class="flex items-center space-x-3 flex-1 min-w-0">
+                            <!-- Section collapse toggle -->
+                            <button v-if="hasSection" @click="collapsed = !collapsed"
+                                    :title="collapsed ? 'Expand section' : 'Collapse section'"
+                                    class="flex-none w-4 text-gray-500 hover:text-gray-200 transition-colors">
+                                <i class="fas text-xs" :class="collapsed ? 'fa-chevron-right' : 'fa-chevron-down'"></i>
+                            </button>
                             <!-- Boolean -->
-                            <input v-if="node.type === 'bool'" type="checkbox" 
+                            <input v-if="node.type === 'bool'" type="checkbox"
                                    :checked="node.value === 'y'" 
                                    :disabled="node.readonly"
                                    @change="$emit('update', node.name, $event.target.checked ? 'y' : 'n')"
                                    class="h-5 w-5 md:h-4 md:w-4 rounded border-gray-700 bg-gray-900 text-blue-600 focus:ring-blue-500 disabled:opacity-50 flex-none">
                             
-                            <div class="flex flex-col min-w-0">
+                            <div class="flex flex-col min-w-0" :class="hasSection ? 'cursor-pointer' : ''" @click="hasSection && (collapsed = !collapsed)">
                                 <span class="text-sm" :class="[node.type === 'menu' ? 'font-bold text-blue-400' : 'text-gray-100', node.readonly ? 'opacity-50' : '']">
                                     {{ node.prompt }}
                                 </span>
@@ -859,8 +878,8 @@
                     
                     <p v-if="node.help" class="text-[10px] text-gray-300 mt-1 ml-8 max-w-2xl leading-relaxed italic opacity-90">{{ node.help }}</p>
 
-                    <!-- Only show children if NOT a choice (to avoid redundant checkboxes) -->
-                    <div v-if="node.children && node.type !== 'choice'" class="kconfig-menu mt-1 ml-4 border-l border-gray-800 pl-2">
+                    <!-- Only show children if NOT a choice (to avoid redundant checkboxes) and not collapsed -->
+                    <div v-if="hasSection && !collapsed" class="kconfig-menu mt-1 ml-4 border-l border-gray-800 pl-2">
                         <kconfig-node v-for="child in node.children" :key="child.name || child.prompt" :node="child" :show-raw-symbol-names="showRawSymbolNames" @update="(n, v) => $emit('update', n, v)"></kconfig-node>
                     </div>
                 </div>
@@ -882,6 +901,7 @@
                 const firmwareName = ref('Klipper');
                 const selectedProfile = ref(localStorage.getItem('kf_profile') || '');
                 const loading = ref(false);
+                const refreshing = ref(false);
                 const building = ref(false);
                 const flashing = ref(false);
                 const updating = ref(false);
@@ -1021,11 +1041,18 @@
                 watch(showRawSymbolNames, (v) => localStorage.setItem('kf_show_raw_symbols', v));
                 watch(showOptionalFeatures, (v) => {
                     localStorage.setItem('kf_show_optional', v);
-                    fetchTree(selectedProfile.value);
+                    fetchTree(selectedProfile.value, { silent: true });
                 });
 
-                const fetchTree = async (profile = '') => {
-                    loading.value = true;
+                // silent: keep the current tree rendered and refresh it in place
+                // (used for dependency/visibility recomputes after an edit) instead
+                // of blanking the whole panel with the full-page spinner.
+                const fetchTree = async (profile = '', { silent = false } = {}) => {
+                    if (silent) {
+                        refreshing.value = true;
+                    } else {
+                        loading.value = true;
+                    }
                     error.value = null;
                     try {
                         const values = Object.entries(modifiedValues.value).map(([name, value]) => ({ name, value }));
@@ -1045,9 +1072,12 @@
                         configTree.value = await res.json();
                     } catch (e) {
                         console.error(e);
-                        error.value = e.message;
+                        // On a silent refresh, keep the existing tree visible rather
+                        // than replacing it with a full-panel error.
+                        if (!silent) error.value = e.message;
                     } finally {
                         loading.value = false;
+                        refreshing.value = false;
                     }
                 };
 
@@ -1284,10 +1314,11 @@
                     };
                     updateNode(configTree.value);
 
-                    // Debounced refresh for visibility/dependencies
+                    // Debounced refresh for visibility/dependencies, done in place
+                    // so the tree stays put instead of flashing the full spinner.
                     clearTimeout(updateTimeout);
                     updateTimeout = setTimeout(() => {
-                        fetchTree(selectedProfile.value);
+                        fetchTree(selectedProfile.value, { silent: true });
                     }, 500);
                 };
 
@@ -2184,7 +2215,7 @@
                 };
 
                 return { 
-                    view, sidebarOpen, configTree, profiles, fleet, selectedProfile, loading, building, flashing, updating, querying, printing, printState, printFilename,
+                    view, sidebarOpen, configTree, profiles, fleet, selectedProfile, loading, refreshing, building, flashing, updating, querying, printing, printState, printFilename,
                     buildLogs, formattedLogs, expandLogs, expandLogsHeight, copyLogs, logsCopied, updateValue, saveProfile, saveProfileAs, newProfile, deleteProfile, renameProfile, loadProfile, createMissingProfile, startBuild, runBatch, selfUpdate,
                     devices, selectedDevice, discoverDevices, startFlash, quickFlash, quickBuild, quickFlashOnly, flashBeacon, beaconUpToDate, buildAndDownload, rebootDevice, statusColor, formatStatus,
                     addDeviceToFleet, attachToFleet, updateFleetDevice, onDeviceProfileChange, removeDeviceFromFleet, error, modifiedValues, formatNotes,
