@@ -674,48 +674,39 @@ class TestMakeFlash:
         assert "Error copying profile config" in combined
 
     def test_batch_reboot_skips_non_katapult_serial(self):
-        """In batch flash, serial devices without Katapult should NOT be added to reboot_tasks."""
-        # Simulates the reboot_tasks logic from main.py batch flash
-        devices = [
-            {"id": "avr-device", "method": "serial", "name": "AVR Board", "is_katapult": False, "is_bridge": False},
-            {"id": "stm-device", "method": "serial", "name": "STM Board", "is_katapult": True, "is_bridge": False},
-            {"id": "can-device", "method": "can", "name": "CAN Board", "is_bridge": False},
-        ]
+        """In batch flash, direct-flash serial devices should NOT need a reboot."""
+        from backend.main import flashes_directly
 
-        reboot_tasks = []
-        for dev in devices:
-            needs_reboot = (
+        # The batch reboot guard reboots non-bridge can/serial/dfu devices that
+        # are not direct-flash. Exercise it against the real flashes_directly().
+        def needs_reboot(dev):
+            return (
                 not dev.get('is_bridge')
                 and dev['method'] in ('can', 'serial', 'dfu')
-                and not (dev['method'] == 'serial' and not dev.get('is_katapult', True))
+                and not flashes_directly(dev)
             )
-            if needs_reboot:
-                reboot_tasks.append(dev['id'])
 
-        # AVR device should NOT be rebooted
-        assert "avr-device" not in reboot_tasks
-        # STM (Katapult) device should be rebooted
-        assert "stm-device" in reboot_tasks
-        # CAN device should be rebooted
-        assert "can-device" in reboot_tasks
+        avr = {"id": "avr", "method": "serial", "is_katapult": False, "is_bridge": False}
+        stm = {"id": "stm", "method": "serial", "is_katapult": True, "is_bridge": False}
+        can = {"id": "can", "method": "can", "is_bridge": False}
+
+        assert not needs_reboot(avr)   # direct-flash → flashes in place
+        assert needs_reboot(stm)       # Katapult serial → reboot to bootloader
+        assert needs_reboot(can)       # CAN → reboot to Katapult
 
     def test_batch_status_allows_direct_serial_flash(self):
-        """Non-Katapult serial devices should NOT be skipped when status is 'service'."""
-        # Simulates the status guard from main.py batch flash
+        """is_flashable_now: direct-serial in 'service' is flashable; Katapult is not."""
+        from backend.main import is_flashable_now
+
         dev_katapult = {"method": "serial", "is_katapult": True}
         dev_avr = {"method": "serial", "is_katapult": False}
-        dev_linux = {"method": "linux"}
 
-        def should_skip(dev, status):
-            is_direct_serial = dev['method'] == 'serial' and not dev.get('is_katapult', True)
-            return status not in ["ready", "dfu"] and dev['method'] != "linux" and not is_direct_serial
-
-        # AVR in "service" status should NOT be skipped (flashes directly)
-        assert not should_skip(dev_avr, "service")
-        # Katapult serial in "service" status SHOULD be skipped (needs bootloader)
-        assert should_skip(dev_katapult, "service")
-        # Linux is never skipped
-        assert not should_skip(dev_linux, "service")
+        # Direct-flash serial in "service" IS flashable (service is its ready state)
+        assert is_flashable_now("service", dev_avr) is True
+        # Katapult serial in "service" is NOT flashable yet (needs bootloader)
+        assert is_flashable_now("service", dev_katapult) is False
+        # Katapult serial in "ready" IS flashable
+        assert is_flashable_now("ready", dev_katapult) is True
 
     def test_is_katapult_defaults_true(self):
         """Devices without explicit is_katapult should default to True (backward compatibility)."""
@@ -726,6 +717,171 @@ class TestMakeFlash:
         assert dev_no_flag.get('is_katapult', True) is True
         assert dev_true.get('is_katapult', True) is True
         assert dev_false.get('is_katapult', True) is False
+
+
+# ---------------------------------------------------------------------------
+# Flash protocol (how) vs readiness (whether) — issue #25
+# ---------------------------------------------------------------------------
+
+
+class TestFlashProtocolAndReadiness:
+    """The state model split: resolve_flash_protocol() is the static 'how',
+    is_flashable_now() is the dynamic 'whether'. They must stay independent so
+    'service' means the same thing for every board type."""
+
+    # --- resolve_flash_protocol: the static "how" axis ---
+
+    def test_protocol_linux(self):
+        from backend.main import resolve_flash_protocol
+        assert resolve_flash_protocol({"method": "linux"}) == "linux"
+
+    def test_protocol_dfu(self):
+        from backend.main import resolve_flash_protocol
+        assert resolve_flash_protocol({"method": "dfu"}) == "dfu"
+
+    def test_protocol_can_is_katapult(self):
+        from backend.main import resolve_flash_protocol
+        assert resolve_flash_protocol({"method": "can"}) == "katapult"
+
+    def test_protocol_serial_katapult_by_default(self):
+        from backend.main import resolve_flash_protocol
+        # No flag, no profile → assume Katapult (backward compatible)
+        assert resolve_flash_protocol({"method": "serial"}) == "katapult"
+
+    def test_protocol_serial_direct_via_flag(self):
+        from backend.main import resolve_flash_protocol
+        assert resolve_flash_protocol(
+            {"method": "serial", "is_katapult": False}
+        ) == "direct"
+
+    def test_protocol_bridge_is_always_katapult(self):
+        from backend.main import resolve_flash_protocol
+        # A bridge reaches Katapult over serial even if is_katapult is unset
+        assert resolve_flash_protocol(
+            {"method": "serial", "is_bridge": True}
+        ) == "katapult"
+
+    def test_protocol_serial_direct_inferred_from_sam_profile(self, tmp_path):
+        """A SAM4 profile (DaVinci's board) infers direct-flash without the flag."""
+        (tmp_path / "sam4e8e.config").write_text("CONFIG_MACH_SAM=y\nCONFIG_MCU=sam4e8e\n")
+        with patch("backend.main.PROFILES_DIR", str(tmp_path)):
+            from backend.main import resolve_flash_protocol
+            assert resolve_flash_protocol(
+                {"method": "serial", "profile": "sam4e8e"}
+            ) == "direct"
+
+    def test_protocol_serial_direct_inferred_from_avr_profile(self, tmp_path):
+        (tmp_path / "mega.config").write_text("CONFIG_MACH_AVR=y\n")
+        with patch("backend.main.PROFILES_DIR", str(tmp_path)):
+            from backend.main import resolve_flash_protocol
+            assert resolve_flash_protocol(
+                {"method": "serial", "profile": "mega"}
+            ) == "direct"
+
+    def test_protocol_stm32_profile_stays_katapult(self, tmp_path):
+        (tmp_path / "spider.config").write_text("CONFIG_MACH_STM32=y\n")
+        with patch("backend.main.PROFILES_DIR", str(tmp_path)):
+            from backend.main import resolve_flash_protocol
+            assert resolve_flash_protocol(
+                {"method": "serial", "profile": "spider"}
+            ) == "katapult"
+
+    # --- is_flashable_now: the dynamic "whether" axis, full matrix ---
+
+    def test_flashable_matrix(self):
+        from backend.main import is_flashable_now
+
+        direct = {"method": "serial", "is_katapult": False}
+        katapult = {"method": "serial", "is_katapult": True}
+        can = {"method": "can"}
+
+        # bootloader modes are always flashable, regardless of protocol
+        assert is_flashable_now("ready", katapult) is True
+        assert is_flashable_now("ready", can) is True
+        assert is_flashable_now("dfu", katapult) is True
+
+        # 'service' is flashable ONLY for direct-flash devices
+        assert is_flashable_now("service", direct) is True
+        assert is_flashable_now("service", katapult) is False
+        assert is_flashable_now("service", can) is False
+
+        # offline is never flashable
+        assert is_flashable_now("offline", direct) is False
+        assert is_flashable_now("offline", katapult) is False
+
+    def test_flashes_directly_matches_protocol(self):
+        from backend.main import flashes_directly
+        assert flashes_directly({"method": "serial", "is_katapult": False}) is True
+        assert flashes_directly({"method": "serial", "is_katapult": True}) is False
+        assert flashes_directly({"method": "can"}) is False
+        assert flashes_directly({"method": "linux"}) is False
+
+    def test_skip_reason(self):
+        from backend.main import skip_reason
+
+        katapult = {"method": "can", "is_katapult": True}
+        direct = {"method": "serial", "is_katapult": False}
+
+        # Offline is unreachable regardless of protocol
+        assert skip_reason("offline", katapult) == "offline / unreachable"
+        # Katapult in service needs a reboot (Flash All)
+        assert "Flash All" in skip_reason("service", katapult)
+        # Direct-flash in service is not given the reboot reason (it flashes)
+        assert skip_reason("service", direct) == "service"
+
+    def test_flash_ready_does_not_reboot_but_flash_all_does(self):
+        """Flash Ready must not reboot running MCUs; Flash All may."""
+        from backend.main import reboots_into_bootloader
+
+        katapult_can = {"method": "can", "is_katapult": True, "is_bridge": False}
+        direct = {"method": "serial", "is_katapult": False}
+        bridge = {"method": "can", "is_katapult": True, "is_bridge": True}
+
+        # Flash Ready never reboots
+        assert reboots_into_bootloader("build-flash-ready", katapult_can) is False
+        # Flash All reboots a Katapult device into the bootloader
+        assert reboots_into_bootloader("build-flash-all", katapult_can) is True
+        # Direct-flash boards flash in place — never rebooted, even on Flash All
+        assert reboots_into_bootloader("build-flash-all", direct) is False
+        # Bridges are handled in a later phase, not here
+        assert reboots_into_bootloader("build-flash-all", bridge) is False
+
+    def test_flashed_by_ready_predicts_build_need(self):
+        """Build phase must build for devices Flash Ready will flash."""
+        from backend.main import flashed_by_ready
+
+        # Linux host always flashes (it becomes ready once services stop)
+        assert flashed_by_ready("service", {"method": "linux"}) is True
+        # Direct-flash board in service flashes in place
+        assert flashed_by_ready(
+            "service", {"method": "serial", "is_katapult": False}
+        ) is True
+        # Katapult device in service won't flash (needs reboot) -> no build
+        assert flashed_by_ready(
+            "service", {"method": "can", "is_katapult": True}
+        ) is False
+        # Offline device won't flash -> no build
+        assert flashed_by_ready(
+            "offline", {"method": "can", "is_katapult": True}
+        ) is False
+        # A device already in a bootloader flashes
+        assert flashed_by_ready(
+            "ready", {"method": "can", "is_katapult": True}
+        ) is True
+
+    def test_reconcile_flash_status(self):
+        """A device present at discovery must not be downgraded to offline just
+        because services were stopped and it's momentarily undetectable."""
+        from backend.main import reconcile_flash_status
+
+        # Re-check 'offline' but it was 'service' at discovery -> keep 'service'
+        assert reconcile_flash_status("offline", "service") == "service"
+        # Re-check 'offline' and it really was offline at discovery -> offline
+        assert reconcile_flash_status("offline", "offline") == "offline"
+        # No discovery status to fall back on -> trust the re-check
+        assert reconcile_flash_status("offline", None) == "offline"
+        # A successful transition (e.g. service -> ready after reboot) is kept
+        assert reconcile_flash_status("ready", "service") == "ready"
 
 
 # ---------------------------------------------------------------------------
