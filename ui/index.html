@@ -530,10 +530,16 @@
                                                 <span>CAN Bridge</span>
                                             </span>
                                         </div>
-                                        <label v-if="dev.method !== 'beacon'" class="flex items-center space-x-2 cursor-pointer group" :title="'This device will only be flashed when done individually. It will be skipped during Flash All, Build & Flash Ready, and Build & Flash All operations.'">
-                                            <input type="checkbox" v-model="dev.exclude_from_batch" @change="updateFleetDevice(dev)" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-orange-600 focus:ring-orange-500">
-                                            <span class="text-[10px] text-orange-400 group-hover:text-orange-300 uppercase font-bold">Exclude from Flash All</span>
-                                        </label>
+                                        <div v-if="dev.method !== 'beacon'" class="flex flex-col items-start space-y-2">
+                                            <label class="flex items-center space-x-2 cursor-pointer group" :class="{'opacity-60 cursor-not-allowed': dev.exclude_from_build}" :title="dev.exclude_from_build ? 'Required because this device is excluded from Build All.' : 'This device will only be flashed when done individually. It will be skipped during Flash All, Build & Flash Ready, and Build & Flash All operations.'">
+                                                <input type="checkbox" v-model="dev.exclude_from_batch" @change="updateFleetDevice(dev)" :disabled="dev.exclude_from_build" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-orange-600 focus:ring-orange-500 disabled:cursor-not-allowed">
+                                                <span class="text-[10px] text-orange-400 group-hover:text-orange-300 uppercase font-bold">Exclude from Flash All</span>
+                                            </label>
+                                            <label class="flex items-center space-x-2 cursor-pointer group" :title="'This device will not be compiled during Build All, Build & Flash Ready, or Build & Flash All operations and will also be excluded from batch flashing. Individual builds are unaffected.'">
+                                                <input type="checkbox" v-model="dev.exclude_from_build" @change="onExcludeFromBuildChange(dev)" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-orange-600 focus:ring-orange-500">
+                                                <span class="text-[10px] text-orange-400 group-hover:text-orange-300 uppercase font-bold">Exclude from Build All</span>
+                                            </label>
+                                        </div>
                                     </div>
                                     <div class="mt-3">
                                         <textarea v-model="dev.notes" @change="updateFleetDevice(dev)" 
@@ -919,6 +925,7 @@
                 const buildLogs = ref("");
                 const currentTaskId = ref(null);
                 const taskCancelled = ref(false);
+                let fleetMutationVersion = 0;
                 
                 // Computed property to parse color markers into HTML
                 const formattedLogs = computed(() => {
@@ -1131,21 +1138,46 @@
                     return dev.profile && profileInfo.value[dev.profile]?.is_linux;
                 };
 
+                const applyFleetSnapshot = (snapshot, requestMutationVersion) => {
+                    if (requestMutationVersion !== fleetMutationVersion) return false;
+                    const currentById = new Map(fleet.value.map(dev => [dev.id, dev]));
+                    fleet.value = snapshot.map(dev => {
+                        const current = currentById.get(dev.id);
+                        if (!current) return dev;
+                        const merged = { ...dev };
+                        if (merged.exclude_from_build === undefined) {
+                            merged.exclude_from_build = !!current.exclude_from_build;
+                        }
+                        if (merged.exclude_from_batch === undefined) {
+                            merged.exclude_from_batch = !!current.exclude_from_batch;
+                        }
+                        if (merged.exclude_from_build) {
+                            merged.exclude_from_batch = true;
+                        }
+                        return merged;
+                    });
+                    return true;
+                };
+
                 const fetchFleet = async (fast = true) => {
+                    const requestMutationVersion = fleetMutationVersion;
                     querying.value = true;
                     try {
                         // Only do the "fast" load if requested and we don't have data or it's a manual refresh
                         if (fast && fleet.value.length === 0) {
-                            const fastRes = await fetch('/fleet?fast=true');
-                            fleet.value = await fastRes.json();
+                            const fastRes = await fetch('/fleet?fast=true', { cache: 'no-store' });
+                            const fastSnapshot = await fastRes.json();
+                            if (!applyFleetSnapshot(fastSnapshot, requestMutationVersion)) return;
                         }
 
                         // Then, get the full status (this may be slow due to CAN discovery)
-                        const res = await fetch('/fleet');
-                        fleet.value = await res.json();
+                        const res = await fetch('/fleet', { cache: 'no-store' });
+                        const snapshot = await res.json();
+                        if (!applyFleetSnapshot(snapshot, requestMutationVersion)) return;
 
                         // Fetch version info for devices
                         await fetchVersions();
+                        if (requestMutationVersion !== fleetMutationVersion) return;
 
                         // Reconcile profile-driven flags (CAN bridge, Linux)
                         reconcileProfileFlags();
@@ -1158,7 +1190,7 @@
 
                 const fetchVersions = async () => {
                     try {
-                        const res = await fetch('/fleet/versions');
+                        const res = await fetch('/fleet/versions', { cache: 'no-store' });
                         deviceVersions.value = await res.json();
                     } catch (e) {
                         console.error("Failed to fetch versions", e);
@@ -1789,6 +1821,7 @@
                         magic_baud_tested: false,
                         use_magic_baud: false,
                         exclude_from_batch: isBeacon,  // beacon uses update_firmware.py, not batch pipeline; always excluded
+                        exclude_from_build: false,
                         custom_make_command: null
                     };
 
@@ -1876,7 +1909,8 @@
                     }
                 };
 
-                const updateFleetDevice = async (dev) => {
+                const updateFleetDevice = async (dev, refreshAfterSave = false) => {
+                    fleetMutationVersion++;
                     try {
                         const payload = { ...dev };
                         if (dev._oldId && dev._oldId !== dev.id) {
@@ -1885,17 +1919,27 @@
                         const res = await fetch('/fleet/device', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
+                            cache: 'no-store',
                             body: JSON.stringify(payload)
                         });
                         if (!res.ok) throw new Error("Failed to update device");
                         if (payload.old_id) {
                             dev._oldId = dev.id;
-                            await fetchFleet(); // Refresh to ensure IDs are synced
+                        }
+                        if (payload.old_id || refreshAfterSave) {
+                            await fetchFleet(false); // Refresh to ensure IDs are synced
                         }
                     } catch (e) {
                         await showAlert("Error", "Error: " + e.message);
                         await fetchFleet(); // Revert on error
                     }
+                };
+
+                const onExcludeFromBuildChange = async (dev) => {
+                    if (dev.exclude_from_build) {
+                        dev.exclude_from_batch = true;
+                    }
+                    await updateFleetDevice(dev, true);
                 };
 
                 const onDeviceProfileChange = async (dev) => {
@@ -2219,7 +2263,7 @@
                     view, sidebarOpen, configTree, profiles, fleet, selectedProfile, loading, refreshing, building, flashing, updating, querying, printing, printState, printFilename,
                     buildLogs, formattedLogs, expandLogs, expandLogsHeight, copyLogs, logsCopied, updateValue, saveProfile, saveProfileAs, newProfile, deleteProfile, renameProfile, loadProfile, createMissingProfile, startBuild, runBatch, selfUpdate,
                     devices, selectedDevice, discoverDevices, startFlash, quickFlash, quickBuild, quickFlashOnly, flashBeacon, beaconUpToDate, buildAndDownload, rebootDevice, statusColor, formatStatus,
-                    addDeviceToFleet, attachToFleet, updateFleetDevice, onDeviceProfileChange, removeDeviceFromFleet, error, modifiedValues, formatNotes,
+                    addDeviceToFleet, attachToFleet, updateFleetDevice, onExcludeFromBuildChange, onDeviceProfileChange, removeDeviceFromFleet, error, modifiedValues, formatNotes,
                     printerUrl, printerTitle, hasReferrer, profileInfo, isProfileCanBridge, isProfileLinux,
                     modal, showAlert, showConfirm, showPrompt, closeModal, testMagicBaud,
                     services, manageServices, cancelTask, currentTaskId,
@@ -2235,4 +2279,3 @@
     </script>
 </body>
 </html>
-
