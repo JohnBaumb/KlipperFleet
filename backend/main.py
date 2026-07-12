@@ -685,6 +685,7 @@ class Device(BaseModel):
     dfu_id: Optional[str] = None
     magic_baud_tested: bool = False
     use_magic_baud: bool = False
+    use_katapult_dfu: bool = False
     dfu_exit_tested: bool = False
     use_dfu_exit: bool = False
     exclude_from_batch: bool = False
@@ -698,6 +699,7 @@ class FlashRequest(BaseModel):
     dfu_id: Optional[str] = None
     baudrate: Optional[int] = 250000  # Serial baudrate for Katapult
     use_magic_baud: Optional[bool] = False
+    use_katapult_dfu: Optional[bool] = False
     use_dfu_exit: Optional[bool] = True
 
 
@@ -1438,6 +1440,9 @@ async def batch_operation(
                                     'use_magic_baud': dev.get(
                                         'use_magic_baud', False
                                     ),
+                                    'use_katapult_dfu': dev.get(
+                                        'use_katapult_dfu', False
+                                    ),
                                     'interface': dev.get('interface', 'can0'),
                                     'baudrate': dev.get('baudrate', 250000),
                                     'dfu_id': dev.get('dfu_id'),
@@ -1468,13 +1473,21 @@ async def batch_operation(
                         if task_store.is_cancelled(task_id):
                             return
                         if dev_info['method'] == 'dfu':
-                            if dev_info.get('use_magic_baud'):
+                            if dev_info.get('use_magic_baud') or dev_info.get(
+                                'use_katapult_dfu'
+                            ):
                                 task_store.add_log(
                                     task_id,
                                     f'>>> Requesting DFU reboot for {dev_info["name"]} ({dev_info["id"]})...\n',
                                 )
                                 async for log in flash_mgr.reboot_to_dfu(
-                                    dev_info['id']
+                                    dev_info['id'],
+                                    use_katapult_dfu=dev_info.get(
+                                        'use_katapult_dfu', False
+                                    ),
+                                    interface=dev_info.get(
+                                        'interface', 'can0'
+                                    ),
                                 ):
                                     if task_store.is_cancelled(task_id):
                                         return
@@ -1707,7 +1720,11 @@ async def batch_operation(
                                     await flash_mgr.resolve_serial_id(dev['id'])
                                 )
                                 async for log in flash_mgr.reboot_to_dfu(
-                                    serial_id
+                                    serial_id,
+                                    use_katapult_dfu=dev.get(
+                                        'use_katapult_dfu', False
+                                    ),
+                                    interface=dev.get('interface', 'can0'),
                                 ):
                                     if task_store.is_cancelled(task_id):
                                         return
@@ -2561,9 +2578,12 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                 elif req.method == 'dfu' or (
                     req.method == 'serial' and req.dfu_id
                 ):
-                    if req.use_magic_baud:
-                        yield f'>>> Rebooting {req.device_id} to DFU mode (Magic Baud)...\n'
-                        async for log in flash_mgr.reboot_to_dfu(req.device_id):
+                    if req.use_magic_baud or req.use_katapult_dfu:
+                        yield f'>>> Rebooting {req.device_id} to DFU mode...\n'
+                        async for log in flash_mgr.reboot_to_dfu(
+                            req.device_id,
+                            use_katapult_dfu=bool(req.use_katapult_dfu),
+                        ):
                             if task_store.is_cancelled(task_id):
                                 return
                             yield log

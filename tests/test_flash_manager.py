@@ -600,3 +600,112 @@ class TestPostFlashRescan:
         ]
         # Old path still present — nothing changed
         assert old_device_id in current_ids
+
+
+class TestKatapultDfuRequest:
+    """reboot_to_dfu() with use_katapult_dfu uses flashtool --request-dfu.
+
+    Katapult devices do not implement the 1200bps magic baud protocol, so
+    boards without accessible BOOT0/RESET buttons need Katapult's DFU
+    command (flashtool.py --request-dfu) to enter the ROM DFU bootloader.
+    """
+
+    def _mock_process(self, returncode, output=b""):
+        proc = MagicMock()
+        proc.communicate = AsyncMock(return_value=(output, None))
+        proc.returncode = returncode
+        return proc
+
+    def test_serial_path_uses_flashtool_request_dfu(self):
+        """A /dev/ path must invoke flashtool -d <path> --request-dfu."""
+        fm = FlashManager("/tmp/klipper", "/tmp/katapult")
+        serial_path = "/dev/serial/by-id/usb-katapult_stm32f446xx_ABC123-if00"
+        fm.resolve_serial_id = AsyncMock(return_value=serial_path)
+        captured = {}
+
+        async def fake_exec(*cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            return self._mock_process(0, b"DFU Request Complete\n")
+
+        async def run():
+            lines = []
+            with patch("asyncio.create_subprocess_exec", side_effect=fake_exec), \
+                 patch("asyncio.sleep", new=AsyncMock()):
+                async for line in fm.reboot_to_dfu(
+                    serial_path, use_katapult_dfu=True
+                ):
+                    lines.append(line)
+            assert "--request-dfu" in captured["cmd"]
+            assert "-d" in captured["cmd"]
+            assert serial_path in captured["cmd"]
+            # Success: the 1200bps fallback must not run
+            assert not any("1200bps trick" in line for line in lines)
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+    def test_can_uuid_uses_interface_and_uuid(self):
+        """A CAN UUID must invoke flashtool -i <interface> -u <uuid> --request-dfu."""
+        fm = FlashManager("/tmp/klipper", "/tmp/katapult")
+        can_uuid = "c20262880b1b"
+        fm.resolve_serial_id = AsyncMock(return_value=can_uuid)
+        captured = {}
+
+        async def fake_exec(*cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            return self._mock_process(0, b"DFU Request Complete\n")
+
+        async def run():
+            with patch("asyncio.create_subprocess_exec", side_effect=fake_exec), \
+                 patch("asyncio.sleep", new=AsyncMock()):
+                async for _ in fm.reboot_to_dfu(
+                    can_uuid, use_katapult_dfu=True, interface="can0"
+                ):
+                    pass
+            assert "--request-dfu" in captured["cmd"]
+            assert "-u" in captured["cmd"]
+            assert can_uuid in captured["cmd"]
+            assert "-i" in captured["cmd"]
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+    def test_falls_back_to_magic_baud_on_failure(self):
+        """A failed flashtool DFU request must fall back to the 1200bps trick."""
+        fm = FlashManager("/tmp/klipper", "/tmp/katapult")
+        serial_path = "/dev/serial/by-id/usb-katapult_stm32f446xx_ABC123-if00"
+        fm.resolve_serial_id = AsyncMock(return_value=serial_path)
+
+        async def fake_exec(*cmd, **kwargs):
+            return self._mock_process(1, b"Flash Tool Error\n")
+
+        async def run():
+            lines = []
+            with patch("asyncio.create_subprocess_exec", side_effect=fake_exec), \
+                 patch("asyncio.sleep", new=AsyncMock()):
+                async for line in fm.reboot_to_dfu(
+                    serial_path, use_katapult_dfu=True
+                ):
+                    lines.append(line)
+            assert any("Falling back" in line for line in lines)
+            assert any("1200bps trick" in line for line in lines)
+
+        asyncio.get_event_loop().run_until_complete(run())
+
+    def test_disabled_by_default(self):
+        """Without use_katapult_dfu, flashtool must not be invoked."""
+        fm = FlashManager("/tmp/klipper", "/tmp/katapult")
+        serial_path = "/dev/serial/by-id/usb-katapult_stm32f446xx_ABC123-if00"
+        fm.resolve_serial_id = AsyncMock(return_value=serial_path)
+        captured = {}
+
+        async def fake_exec(*cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            return self._mock_process(0)
+
+        async def run():
+            with patch("asyncio.create_subprocess_exec", side_effect=fake_exec), \
+                 patch("asyncio.sleep", new=AsyncMock()):
+                async for _ in fm.reboot_to_dfu(serial_path):
+                    pass
+            assert "cmd" not in captured
+
+        asyncio.get_event_loop().run_until_complete(run())

@@ -1386,10 +1386,62 @@ class FlashManager:
         else:
             yield '>>> Device path not found. It may already be in bootloader mode.\n'
 
-    async def reboot_to_dfu(self, device_id: str) -> AsyncGenerator[str, None]:
-        """Attempts to reboot a device into DFU mode using the 1200bps magic baud rate."""
+    async def reboot_to_dfu(
+        self,
+        device_id: str,
+        use_katapult_dfu: bool = False,
+        interface: str = 'can0',
+    ) -> AsyncGenerator[str, None]:
+        """Attempts to reboot a device into DFU mode.
+
+        When ``use_katapult_dfu`` is set, Katapult's ``flashtool.py
+        --request-dfu`` is used to ask the bootloader to jump into the
+        STM32 ROM DFU bootloader (requires Katapult built with DFU
+        support). flashtool handles the full chain itself: a device
+        running Klipper is first rebooted into Katapult (serial or CAN
+        bridge), then asked to enter DFU. Falls back to the 1200bps
+        magic baud trick on failure.
+        """
         # If device_id is a DFU ID, but the device is in Serial mode, resolve it first
         actual_id: str = await self.resolve_serial_id(device_id)
+        if use_katapult_dfu:
+            yield f'>>> Requesting ROM DFU reboot for {actual_id} via Katapult (--request-dfu)...\n'
+            cmd: List[str] = [
+                'python3',
+                os.path.join(self.katapult_dir, 'scripts', 'flashtool.py'),
+            ]
+            is_can: bool = not actual_id.startswith('/dev/')
+            if is_can:
+                cmd += ['-i', interface, '-u', actual_id]
+            else:
+                cmd += ['-d', actual_id]
+            cmd.append('--request-dfu')
+            if is_can:
+                async with self._can_lock:
+                    process: Process = await asyncio.create_subprocess_exec(
+                        *cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT,
+                    )
+                    stdout, _ = await process.communicate()
+                    self._can_cache_time[interface] = 0.0  # Invalidate cache
+            else:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                stdout, _ = await process.communicate()
+            yield stdout.decode()
+            if process.returncode == 0:
+                yield '>>> DFU request sent. Waiting 3s for USB enumeration...\n'
+                await asyncio.sleep(3)
+                return
+            yield (
+                '>>> Katapult DFU request failed (flashtool or the Katapult '
+                'build may lack --request-dfu support). Falling back to the '
+                '1200bps trick.\n'
+            )
         yield f'>>> Attempting to reboot {actual_id} into DFU mode (1200bps trick)...\n'
         try:
             # The 1200bps trick: open and close the port at 1200bps

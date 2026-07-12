@@ -605,9 +605,17 @@
                                                 <span class="text-[9px] text-gray-400 group-hover:text-gray-200 uppercase font-bold" title="AUTO-DFU: If the device is in runtime, attempt to reboot it into DFU before flashing.">Auto-DFU</span>
                                             </label>
 
+                                            <label class="flex items-center space-x-1.5 cursor-pointer group" v-if="dev.is_katapult">
+                                                <input type="checkbox"
+                                                       v-model="dev.use_katapult_dfu"
+                                                       @change="updateFleetDevice(dev)"
+                                                       class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-orange-600 focus:ring-orange-500 disabled:cursor-not-allowed">
+                                                <span class="text-[9px] text-gray-400 group-hover:text-gray-200 uppercase font-bold" title="KATAPULT-DFU: Enter DFU via Katapult's flashtool --request-dfu (requires Katapult built with DFU support).">Katapult-DFU</span>
+                                            </label>
+
                                             <label class="flex items-center space-x-1.5 cursor-pointer group" :class="{'opacity-40 cursor-not-allowed': !dev.dfu_exit_tested}">
-                                                <input type="checkbox" 
-                                                       v-model="dev.use_dfu_exit" 
+                                                <input type="checkbox"
+                                                       v-model="dev.use_dfu_exit"
                                                        :disabled="!dev.dfu_exit_tested"
                                                        @change="updateFleetDevice(dev)"
                                                        class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-orange-600 focus:ring-orange-500 disabled:cursor-not-allowed">
@@ -1556,6 +1564,7 @@
                     // Find the device in fleet to get use_magic_baud setting
                     const dev = fleet.value.find(d => d.id === deviceId);
                     const useMagicBaud = dev ? dev.use_magic_baud : false;
+                    const useKatapultDfu = dev ? dev.use_katapult_dfu : false;
 
                     taskCancelled.value = false;
                     flashing.value = true;
@@ -1570,7 +1579,8 @@
                                 device_id: deviceId, 
                                 method, 
                                 dfu_id: dfuId,
-                                use_magic_baud: useMagicBaud
+                                use_magic_baud: useMagicBaud,
+                                use_katapult_dfu: useKatapultDfu
                             })
                         });
 
@@ -1790,6 +1800,7 @@
                         dfu_id: method === 'dfu' ? dev.id : null,
                         magic_baud_tested: false,
                         use_magic_baud: false,
+                        use_katapult_dfu: false,
                         exclude_from_batch: isBeacon,  // beacon uses update_firmware.py, not batch pipeline; always excluded
                         custom_make_command: null
                     };
