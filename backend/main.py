@@ -2583,6 +2583,7 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                         async for log in flash_mgr.reboot_to_dfu(
                             req.device_id,
                             use_katapult_dfu=bool(req.use_katapult_dfu),
+                            interface=interface,
                         ):
                             if task_store.is_cancelled(task_id):
                                 return
