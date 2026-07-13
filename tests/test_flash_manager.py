@@ -709,3 +709,27 @@ class TestKatapultDfuRequest:
             assert "cmd" not in captured
 
         asyncio.get_event_loop().run_until_complete(run())
+
+    def test_reboot_device_dfu_mode_passes_flag(self):
+        """reboot_device(mode='dfu') must forward use_katapult_dfu to reboot_to_dfu."""
+        fm = FlashManager("/tmp/klipper", "/tmp/katapult")
+        captured = {}
+
+        async def fake_reboot_to_dfu(device_id, use_katapult_dfu=False, interface='can0'):
+            captured["use_katapult_dfu"] = use_katapult_dfu
+            captured["interface"] = interface
+            yield ">>> mocked\n"
+
+        fm.reboot_to_dfu = fake_reboot_to_dfu
+
+        async def run():
+            async for _ in fm.reboot_device(
+                "c20262880b1b",
+                mode="dfu",
+                interface="can0",
+                use_katapult_dfu=True,
+            ):
+                pass
+            assert captured["use_katapult_dfu"] is True
+
+        asyncio.get_event_loop().run_until_complete(run())

@@ -1181,6 +1181,7 @@ class FlashManager:
         interface: str = 'can0',
         is_bridge: bool = False,
         serial_id: Optional[str] = None,
+        use_katapult_dfu: bool = False,
     ) -> AsyncGenerator[str, None]:
         """Reboots a device, either to Katapult, DFU, or a regular reboot."""
         if mode == 'katapult':
@@ -1192,7 +1193,11 @@ class FlashManager:
             ):
                 yield line
         elif mode == 'dfu':
-            async for line in self.reboot_to_dfu(device_id):
+            async for line in self.reboot_to_dfu(
+                device_id,
+                use_katapult_dfu=use_katapult_dfu,
+                interface=interface,
+            ):
                 yield line
         else:
             # Regular reboot (Return to Service)

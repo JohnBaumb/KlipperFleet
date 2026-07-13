@@ -2907,6 +2907,7 @@ async def reboot_device(
             interface=interface,
             is_bridge=is_bridge,
             serial_id=serial_id,
+            use_katapult_dfu=dev.get('use_katapult_dfu', False),
         ):
             if task_store.is_cancelled(task_id):
                 break
