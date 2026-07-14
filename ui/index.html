@@ -925,7 +925,6 @@
                 const buildLogs = ref("");
                 const currentTaskId = ref(null);
                 const taskCancelled = ref(false);
-                let fleetMutationVersion = 0;
                 
                 // Computed property to parse color markers into HTML
                 const formattedLogs = computed(() => {
@@ -1138,46 +1137,21 @@
                     return dev.profile && profileInfo.value[dev.profile]?.is_linux;
                 };
 
-                const applyFleetSnapshot = (snapshot, requestMutationVersion) => {
-                    if (requestMutationVersion !== fleetMutationVersion) return false;
-                    const currentById = new Map(fleet.value.map(dev => [dev.id, dev]));
-                    fleet.value = snapshot.map(dev => {
-                        const current = currentById.get(dev.id);
-                        if (!current) return dev;
-                        const merged = { ...dev };
-                        if (merged.exclude_from_build === undefined) {
-                            merged.exclude_from_build = !!current.exclude_from_build;
-                        }
-                        if (merged.exclude_from_batch === undefined) {
-                            merged.exclude_from_batch = !!current.exclude_from_batch;
-                        }
-                        if (merged.exclude_from_build) {
-                            merged.exclude_from_batch = true;
-                        }
-                        return merged;
-                    });
-                    return true;
-                };
-
                 const fetchFleet = async (fast = true) => {
-                    const requestMutationVersion = fleetMutationVersion;
                     querying.value = true;
                     try {
                         // Only do the "fast" load if requested and we don't have data or it's a manual refresh
                         if (fast && fleet.value.length === 0) {
-                            const fastRes = await fetch('/fleet?fast=true', { cache: 'no-store' });
-                            const fastSnapshot = await fastRes.json();
-                            if (!applyFleetSnapshot(fastSnapshot, requestMutationVersion)) return;
+                            const fastRes = await fetch('/fleet?fast=true');
+                            fleet.value = await fastRes.json();
                         }
 
                         // Then, get the full status (this may be slow due to CAN discovery)
-                        const res = await fetch('/fleet', { cache: 'no-store' });
-                        const snapshot = await res.json();
-                        if (!applyFleetSnapshot(snapshot, requestMutationVersion)) return;
+                        const res = await fetch('/fleet');
+                        fleet.value = await res.json();
 
                         // Fetch version info for devices
                         await fetchVersions();
-                        if (requestMutationVersion !== fleetMutationVersion) return;
 
                         // Reconcile profile-driven flags (CAN bridge, Linux)
                         reconcileProfileFlags();
@@ -1190,7 +1164,7 @@
 
                 const fetchVersions = async () => {
                     try {
-                        const res = await fetch('/fleet/versions', { cache: 'no-store' });
+                        const res = await fetch('/fleet/versions');
                         deviceVersions.value = await res.json();
                     } catch (e) {
                         console.error("Failed to fetch versions", e);
@@ -1910,7 +1884,6 @@
                 };
 
                 const updateFleetDevice = async (dev, refreshAfterSave = false) => {
-                    fleetMutationVersion++;
                     try {
                         const payload = { ...dev };
                         if (dev._oldId && dev._oldId !== dev.id) {
@@ -1919,7 +1892,6 @@
                         const res = await fetch('/fleet/device', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            cache: 'no-store',
                             body: JSON.stringify(payload)
                         });
                         if (!res.ok) throw new Error("Failed to update device");
