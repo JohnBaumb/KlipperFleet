@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Response
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -1360,10 +1360,10 @@ async def batch_operation(
 
                 # Filter out devices excluded from batch operations
                 excluded_devices = [
-                    d for d in devices if d.get('exclude_from_batch', False)
+                    d for d in devices if is_excluded_from_batch(d)
                 ]
                 devices = [
-                    d for d in devices if not d.get('exclude_from_batch', False)
+                    d for d in devices if not is_excluded_from_batch(d)
                 ]
                 if excluded_devices:
                     excluded_names = ', '.join(
@@ -2164,9 +2164,8 @@ async def download_firmware(profile: str) -> FileResponse:
 
 
 @app.get('/fleet')
-async def get_fleet(response: Response, fast: bool = False) -> List[Dict[str, Any]]:
+async def get_fleet(fast: bool = False) -> List[Dict[str, Any]]:
     """Returns the registered fleet of devices with status."""
-    response.headers['Cache-Control'] = 'no-store'
     fleet: List[Dict[str, Any]] = await fleet_mgr.get_fleet()
 
     # Check for active tasks to get real-time status overrides
@@ -2290,9 +2289,8 @@ async def remove_device(device_id: str) -> Dict[str, str]:
 
 
 @app.get('/fleet/versions')
-async def get_fleet_versions(response: Response) -> Dict[str, Any]:
+async def get_fleet_versions() -> Dict[str, Any]:
     """Gets live version information for all fleet devices that are in service."""
-    response.headers['Cache-Control'] = 'no-store'
     fleet = await fleet_mgr.get_fleet()
     mcu_versions = await flash_mgr.get_mcu_versions()
 

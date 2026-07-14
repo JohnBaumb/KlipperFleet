@@ -769,6 +769,29 @@ class TestMakeFlash:
 
         assert is_excluded_from_batch(device)
 
+    def test_batch_flash_filter_uses_build_exclusion(self):
+        """Batch flash filtering should exclude build-excluded devices."""
+        from backend.main import is_excluded_from_batch
+
+        devices = [
+            {
+                "name": "Toolhead",
+                "exclude_from_batch": False,
+                "exclude_from_build": True,
+            },
+            {
+                "name": "Mainboard",
+                "exclude_from_batch": False,
+                "exclude_from_build": False,
+            },
+        ]
+
+        excluded_devices = [d for d in devices if is_excluded_from_batch(d)]
+        active_devices = [d for d in devices if not is_excluded_from_batch(d)]
+
+        assert [d["name"] for d in excluded_devices] == ["Toolhead"]
+        assert [d["name"] for d in active_devices] == ["Mainboard"]
+
     def test_excluded_batch_builds_appear_when_not_needed(self):
         """Excluded-only build targets should be available for the summary."""
         from backend.main import (
