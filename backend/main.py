@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional, AsyncGenerator, Tuple
+from typing import List, Dict, Any, Optional, AsyncGenerator, Tuple, Set
 from urllib.parse import urlparse
 import os
 import asyncio
@@ -1167,22 +1167,21 @@ async def get_services_status():
     except Exception:
         return []
 
-def get_batch_builds_needed(devices: List[Dict[str, Any]]) -> Dict[tuple, Optional[str]]:
-    """Return unique builds needed for batch build operations."""
-    builds_needed: Dict[tuple, Optional[str]] = {}
+def get_batch_builds_needed(devices: List[Dict[str, Any]]) -> Set[Tuple[str, Optional[str]]]:
+    """Return the unique (profile, custom_make_command) builds a batch needs."""
+    builds_needed: Set[Tuple[str, Optional[str]]] = set()
     for device in devices:
         if device.get('profile') and not device.get('exclude_from_build', False):
-            key = (
+            builds_needed.add((
                 device['profile'],
                 device.get('custom_make_command') or None,
-            )
-            builds_needed[key] = key[1]
+            ))
     return builds_needed
 
 
-def get_excluded_batch_builds(devices: List[Dict[str, Any]], builds_needed: Dict[tuple, Optional[str]]) -> Dict[tuple, Optional[str]]:
+def get_excluded_batch_builds(devices: List[Dict[str, Any]], builds_needed: Set[Tuple[str, Optional[str]]]) -> Set[Tuple[str, Optional[str]]]:
     """Return excluded build targets not required by another active device."""
-    excluded_builds: Dict[tuple, Optional[str]] = {}
+    excluded_builds: Set[Tuple[str, Optional[str]]] = set()
     for device in devices:
         if device.get('profile') and device.get('exclude_from_build', False):
             key = (
@@ -1190,7 +1189,7 @@ def get_excluded_batch_builds(devices: List[Dict[str, Any]], builds_needed: Dict
                 device.get('custom_make_command') or None,
             )
             if key not in builds_needed:
-                excluded_builds[key] = key[1]
+                excluded_builds.add(key)
     return excluded_builds
 
 
@@ -1271,7 +1270,10 @@ async def batch_operation(
                     devices, builds_needed
                 )
                 had_profiles = any(d.get('profile') for d in devices)
-                had_excluded_profiles = bool(excluded_builds)
+                # Whether anything needed building before flash-ready pruning,
+                # so the "nothing to build" message can tell "all excluded"
+                # apart from "nothing was ready to flash".
+                had_builds_to_do = bool(builds_needed)
 
                 # For "Flash Ready", only build profiles whose devices will
                 # actually be flashed. No point compiling firmware for Katapult
@@ -1313,13 +1315,13 @@ async def batch_operation(
                                 f'>>> Skipping build for {key[0]} — not ready '
                                 f'to flash (use Flash All).\n',
                             )
-                            del builds_needed[key]
+                            builds_needed.discard(key)
                     excluded_builds = get_excluded_batch_builds(
                         devices, builds_needed
                     )
 
                 if not builds_needed:
-                    if had_excluded_profiles:
+                    if had_profiles and not had_builds_to_do:
                         msg = (
                             '>>> All profile targets are excluded from Build All. '
                             'Skipping build.\n'
@@ -1336,7 +1338,7 @@ async def batch_operation(
                         )
                     task_store.add_log(task_id, msg)
                 else:
-                    for (profile, custom_cmd), _ in builds_needed.items():
+                    for profile, custom_cmd in sorted(builds_needed, key=lambda k: (k[0], k[1] or '')):
                         if task_store.is_cancelled(task_id):
                             return
                         label = get_build_label(profile, custom_cmd)
@@ -1361,7 +1363,7 @@ async def batch_operation(
                             task_id, f'>>> BATCH BUILD: Finished {label}\n'
                         )
 
-                for (profile, custom_cmd), _ in excluded_builds.items():
+                for profile, custom_cmd in sorted(excluded_builds, key=lambda k: (k[0], k[1] or '')):
                     build_results[get_build_label(profile, custom_cmd)] = (
                         'EXCLUDED'
                     )
