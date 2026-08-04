@@ -3,7 +3,24 @@
 <head><title>Redirecting to KlipperFleet…</title></head>
 <body>
 <script>
-window.location.replace(window.location.protocol + '//' + window.location.hostname + ':8321');
+// The backend is HTTP-only on :8321. Behind a TLS reverse proxy (issue #39)
+// that port is unreachable or protocol-mismatched, so first probe for a
+// /klipperfleet/ proxy location on this origin, then fall back to the port.
+// The Content-Type check rejects Mainsail's SPA fallback, which answers any
+// unknown path with 200 text/html.
+function direct() {
+    window.location.replace('http://' + window.location.hostname + ':8321');
+}
+fetch('/klipperfleet/api/status')
+    .then(function (r) {
+        var ct = r.headers.get('content-type') || '';
+        if (r.ok && ct.indexOf('application/json') !== -1) {
+            window.location.replace('/klipperfleet/');
+        } else {
+            direct();
+        }
+    })
+    .catch(direct);
 </script>
 <noscript><p>JavaScript is required. Visit <a href="http://localhost:8321">KlipperFleet</a> manually.</p></noscript>
 </body>

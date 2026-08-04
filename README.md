@@ -140,6 +140,30 @@ Enable **Show Hidden Files** in Mainsail settings to see the `.theme` folder, th
 ```
 </details>
 
+## Reverse Proxy (TLS / HTTPS)
+
+If you access Mainsail through a TLS reverse proxy, the sidebar link cannot reach KlipperFleet directly: the backend speaks plain HTTP on port 8321, which the proxy usually does not expose. Add a `/klipperfleet/` location to the same nginx `server` block that serves Mainsail:
+
+```nginx
+location /klipperfleet/ {
+    proxy_pass http://127.0.0.1:8321/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+}
+location = /klipperfleet {
+    return 301 /klipperfleet/;
+}
+```
+
+Notes:
+- The trailing slash on `proxy_pass` strips the `/klipperfleet/` prefix, which the app expects.
+- If the proxy runs on a different machine, replace `127.0.0.1` with the printer host's IP.
+- `proxy_buffering off` and the long read timeout keep live build/flash output streaming.
+- The sidebar link probes for this location automatically and uses it when present; without it, the link falls back to `http://<host>:8321`.
+
 ## Usage
 
 1. **Configurator** - Select a profile, configure MCU settings, click **Save**.
