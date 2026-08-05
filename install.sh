@@ -143,9 +143,9 @@ python3 "${SRCDIR}/install_scripts/setup_mainsail_navi.py" "$NAVI_JSON"
 # Deploy redirect shim so the navi link preserves the user's hostname/IP.
 MAINSAIL_ROOT="/home/${USER}/mainsail"
 if [ -d "$MAINSAIL_ROOT" ]; then
-    cp "${SRCDIR}/install_scripts/klipperfleet.html" "$MAINSAIL_ROOT/klipperfleet.html"
-    chown "$USER:$USER_GROUP" "$MAINSAIL_ROOT/klipperfleet.html"
-    chmod 644 "$MAINSAIL_ROOT/klipperfleet.html"
+    cp "${SRCDIR}/install_scripts/klipperfleet.html" "$MAINSAIL_ROOT/printer-klipperfleet.html"
+    chown "$USER:$USER_GROUP" "$MAINSAIL_ROOT/printer-klipperfleet.html"
+    chmod 644 "$MAINSAIL_ROOT/printer-klipperfleet.html"
 else
     log_warn "Mainsail web root not found at $MAINSAIL_ROOT; redirect shim not deployed."
 fi

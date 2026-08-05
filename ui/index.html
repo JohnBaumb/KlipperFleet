@@ -2140,7 +2140,14 @@
                     if (document.referrer) {
                         try {
                             const referrerUrl = new URL(document.referrer);
-                            printerUrl.value = document.referrer;
+                            // Arriving via the reverse-proxy shim (same-origin hop), the
+                            // referrer is our own shim URL; "back" should go to Mainsail
+                            // at the origin root, not bounce through the shim again.
+                            if (referrerUrl.pathname.startsWith('/printer-klipperfleet')) {
+                                printerUrl.value = referrerUrl.origin + '/';
+                            } else {
+                                printerUrl.value = document.referrer;
+                            }
                             hasReferrer.value = true;
                             // Fetch printer UI name from KlipperFleet API (no CORS issues)
                             fetch('api/printer-ui?port=' + (referrerUrl.port || '80'))

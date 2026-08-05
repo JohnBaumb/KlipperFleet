@@ -1096,7 +1096,7 @@ class TestAvrProfileAutoDetection:
 
 
 class TestMainsailShimHeal:
-    """_ensure_mainsail_shim redeploys /klipperfleet.html after Mainsail wipes it.
+    """_ensure_mainsail_shim redeploys /printer-klipperfleet.html after Mainsail wipes it.
 
     Mainsail clears its own web root on every self-update, deleting the shim,
     while the navi.json entry pointing at it survives -> the sidebar link
@@ -1123,7 +1123,7 @@ class TestMainsailShimHeal:
         self._redirect_home(tmp_path, monkeypatch)
         from backend.main import _ensure_mainsail_shim
         await _ensure_mainsail_shim()
-        assert not (tmp_path / "mainsail" / "klipperfleet.html").exists()
+        assert not (tmp_path / "mainsail" / "printer-klipperfleet.html").exists()
 
     @pytest.mark.asyncio
     async def test_deploys_missing_shim(self, tmp_path, monkeypatch):
@@ -1132,7 +1132,7 @@ class TestMainsailShimHeal:
         self._redirect_home(tmp_path, monkeypatch)
         from backend.main import _ensure_mainsail_shim
         await _ensure_mainsail_shim()
-        dst = tmp_path / "mainsail" / "klipperfleet.html"
+        dst = tmp_path / "mainsail" / "printer-klipperfleet.html"
         assert dst.exists()
         assert dst.read_text() == self._shim_src()
 
@@ -1140,7 +1140,7 @@ class TestMainsailShimHeal:
     async def test_overwrites_stale_shim(self, tmp_path, monkeypatch):
         """A stale/corrupted shim is replaced with the current source."""
         (tmp_path / "mainsail").mkdir()
-        dst = tmp_path / "mainsail" / "klipperfleet.html"
+        dst = tmp_path / "mainsail" / "printer-klipperfleet.html"
         dst.write_text("<html>old broken shim</html>")
         self._redirect_home(tmp_path, monkeypatch)
         from backend.main import _ensure_mainsail_shim
@@ -1151,7 +1151,7 @@ class TestMainsailShimHeal:
     async def test_idempotent_when_current(self, tmp_path, monkeypatch):
         """An already-correct shim is left untouched (no needless rewrite)."""
         (tmp_path / "mainsail").mkdir()
-        dst = tmp_path / "mainsail" / "klipperfleet.html"
+        dst = tmp_path / "mainsail" / "printer-klipperfleet.html"
         dst.write_text(self._shim_src())
         mtime_before = dst.stat().st_mtime_ns
         self._redirect_home(tmp_path, monkeypatch)
@@ -1159,3 +1159,62 @@ class TestMainsailShimHeal:
         await _ensure_mainsail_shim()
         assert dst.stat().st_mtime_ns == mtime_before
         assert dst.read_text() == self._shim_src()
+
+
+class TestNaviEntryHeal:
+    """_ensure_navi_entry migrates navi.json to the current shim href.
+
+    navi.json is only written by install.sh, so users updating through
+    Moonraker's update manager keep the old /klipperfleet.html href, which
+    Mainsail's PWA service worker swallows over HTTPS (issue #39).
+    """
+
+    def _redirect_home(self, tmp_path, monkeypatch):
+        import backend.main as main
+        monkeypatch.setattr(
+            main.os.path, "expanduser",
+            lambda p: p.replace("~", str(tmp_path), 1) if p.startswith("~") else p,
+        )
+
+    def _navi_path(self, tmp_path):
+        return tmp_path / "printer_data" / "config" / ".theme" / "navi.json"
+
+    @pytest.mark.asyncio
+    async def test_migrates_old_href(self, tmp_path, monkeypatch):
+        """An old /klipperfleet.html entry is replaced with /printer-klipperfleet.html."""
+        (tmp_path / "mainsail").mkdir()
+        navi = self._navi_path(tmp_path)
+        navi.parent.mkdir(parents=True)
+        navi.write_text(json.dumps([{
+            "title": "KlipperFleet", "href": "/klipperfleet.html",
+            "target": "_self", "icon": "M0,0", "position": 86,
+        }]))
+        self._redirect_home(tmp_path, monkeypatch)
+        from backend.main import _ensure_navi_entry
+        await _ensure_navi_entry()
+        entries = json.loads(navi.read_text())
+        hrefs = [e["href"] for e in entries if e.get("title") == "KlipperFleet"]
+        assert hrefs == ["/printer-klipperfleet.html"]
+
+    @pytest.mark.asyncio
+    async def test_untouched_when_current(self, tmp_path, monkeypatch):
+        """A current entry is left alone (no rewrite on every boot)."""
+        (tmp_path / "mainsail").mkdir()
+        navi = self._navi_path(tmp_path)
+        navi.parent.mkdir(parents=True)
+        navi.write_text(json.dumps([{
+            "title": "KlipperFleet", "href": "/printer-klipperfleet.html",
+        }]))
+        mtime_before = navi.stat().st_mtime_ns
+        self._redirect_home(tmp_path, monkeypatch)
+        from backend.main import _ensure_navi_entry
+        await _ensure_navi_entry()
+        assert navi.stat().st_mtime_ns == mtime_before
+
+    @pytest.mark.asyncio
+    async def test_no_mainsail_root_is_noop(self, tmp_path, monkeypatch):
+        """No ~/mainsail dir -> navi.json not created."""
+        self._redirect_home(tmp_path, monkeypatch)
+        from backend.main import _ensure_navi_entry
+        await _ensure_navi_entry()
+        assert not self._navi_path(tmp_path).exists()

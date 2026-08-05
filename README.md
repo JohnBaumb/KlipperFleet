@@ -131,7 +131,7 @@ Enable **Show Hidden Files** in Mainsail settings to see the `.theme` folder, th
 [
   {
     "title": "KlipperFleet",
-    "href": "/klipperfleet.html",
+    "href": "/printer-klipperfleet.html",
     "target": "_self",
     "icon": "M20,21V19L17,16H13V13H16V11H13V8H16V6H13V3H11V6H8V8H11V11H8V13H11V16H7L4,19V21H20Z",
     "position": 86
@@ -142,10 +142,10 @@ Enable **Show Hidden Files** in Mainsail settings to see the `.theme` folder, th
 
 ## Reverse Proxy (TLS / HTTPS)
 
-If you access Mainsail through a TLS reverse proxy, the sidebar link cannot reach KlipperFleet directly: the backend speaks plain HTTP on port 8321, which the proxy usually does not expose. Add a `/klipperfleet/` location to the same nginx `server` block that serves Mainsail:
+If you access Mainsail through a TLS reverse proxy, the sidebar link cannot reach KlipperFleet directly: the backend speaks plain HTTP on port 8321, which the proxy usually does not expose. Add a `/printer-klipperfleet/` location to the same nginx `server` block that serves Mainsail:
 
 ```nginx
-location /klipperfleet/ {
+location /printer-klipperfleet/ {
     proxy_pass http://127.0.0.1:8321/;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
@@ -153,16 +153,18 @@ location /klipperfleet/ {
     proxy_buffering off;
     proxy_read_timeout 3600s;
 }
-location = /klipperfleet {
-    return 301 /klipperfleet/;
+location = /printer-klipperfleet {
+    return 301 /printer-klipperfleet/;
 }
 ```
 
 Notes:
-- The trailing slash on `proxy_pass` strips the `/klipperfleet/` prefix, which the app expects.
+- The path is `printer-klipperfleet` (not `klipperfleet`) on purpose. Over HTTPS, Mainsail registers a PWA service worker that intercepts navigations to unknown paths and serves Mainsail's own app instead, so the request would never reach nginx. Its bypass list lets any path starting with `printer` through, while nginx's Moonraker route (`^/(printer|api|access|machine|server)/`) requires a slash after the word and so ignores `printer-klipperfleet`. This only affects HTTPS; plain-HTTP installs never register a service worker.
+- The trailing slash on `proxy_pass` strips the `/printer-klipperfleet/` prefix, which the app expects.
 - If the proxy runs on a different machine, replace `127.0.0.1` with the printer host's IP.
 - `proxy_buffering off` and the long read timeout keep live build/flash output streaming.
 - The sidebar link probes for this location automatically and uses it when present; without it, the link falls back to `http://<host>:8321`.
+- If `https://<host>/printer-klipperfleet/` returns a Moonraker JSON 404, your Moonraker location matches it; change the location above to `location ^~ /printer-klipperfleet/`.
 
 ## Usage
 
