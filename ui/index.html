@@ -928,6 +928,7 @@
                 const buildLogs = ref("");
                 const currentTaskId = ref(null);
                 const taskCancelled = ref(false);
+                let fleetMutationVersion = 0;
                 
                 // Computed property to parse color markers into HTML
                 const formattedLogs = computed(() => {
@@ -1140,21 +1141,31 @@
                     return dev.profile && profileInfo.value[dev.profile]?.is_linux;
                 };
 
+                const applyFleetSnapshot = (snapshot, requestMutationVersion) => {
+                    if (requestMutationVersion !== fleetMutationVersion) return false;
+                    fleet.value = snapshot;
+                    return true;
+                };
+
                 const fetchFleet = async (fast = true) => {
+                    const requestMutationVersion = fleetMutationVersion;
                     querying.value = true;
                     try {
                         // Only do the "fast" load if requested and we don't have data or it's a manual refresh
                         if (fast && fleet.value.length === 0) {
-                            const fastRes = await fetch('/fleet?fast=true');
-                            fleet.value = await fastRes.json();
+                            const fastRes = await fetch('/fleet?fast=true', { cache: 'no-store' });
+                            const fastSnapshot = await fastRes.json();
+                            if (!applyFleetSnapshot(fastSnapshot, requestMutationVersion)) return;
                         }
 
                         // Then, get the full status (this may be slow due to CAN discovery)
-                        const res = await fetch('/fleet');
-                        fleet.value = await res.json();
+                        const res = await fetch('/fleet', { cache: 'no-store' });
+                        const snapshot = await res.json();
+                        if (!applyFleetSnapshot(snapshot, requestMutationVersion)) return;
 
                         // Fetch version info for devices
                         await fetchVersions();
+                        if (requestMutationVersion !== fleetMutationVersion) return;
 
                         // Reconcile profile-driven flags (CAN bridge, Linux)
                         reconcileProfileFlags();
@@ -1167,7 +1178,7 @@
 
                 const fetchVersions = async () => {
                     try {
-                        const res = await fetch('/fleet/versions');
+                        const res = await fetch('/fleet/versions', { cache: 'no-store' });
                         deviceVersions.value = await res.json();
                     } catch (e) {
                         console.error("Failed to fetch versions", e);
@@ -1807,6 +1818,7 @@
                     const originalFleet = JSON.parse(JSON.stringify(fleet.value));
 
                     // Optimistic UI update: add fleet card immediately and mark device as managed in discovery
+                    fleetMutationVersion++;
                     fleet.value.push(newDevice);
 
                     ['beacon', 'serial', 'can', 'dfu', 'linux'].forEach(category => {
@@ -1824,6 +1836,7 @@
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify(newDevice)
                             });
+                            fleetMutationVersion++;
                         } catch (fetchError) {
                             throw new Error("Network error: " + fetchError.message);
                         }
@@ -1887,6 +1900,7 @@
                 };
 
                 const updateFleetDevice = async (dev, refreshAfterSave = false) => {
+                    fleetMutationVersion++;
                     try {
                         const payload = { ...dev };
                         if (dev._oldId && dev._oldId !== dev.id) {
@@ -1897,6 +1911,7 @@
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify(payload)
                         });
+                        fleetMutationVersion++;
                         if (!res.ok) throw new Error("Failed to update device");
                         if (payload.old_id) {
                             dev._oldId = dev.id;
@@ -1938,6 +1953,7 @@
                     const originalDevices = JSON.parse(JSON.stringify(devices.value));
 
                     // Optimistic UI update: immediately remove from fleet
+                    fleetMutationVersion++;
                     const idx = fleet.value.findIndex(d => d.id === id);
                     if (idx >= 0) {
                         fleet.value.splice(idx, 1);
@@ -1957,6 +1973,7 @@
                         let res;
                         try {
                             res = await fetch(`/fleet/device?device_id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+                            fleetMutationVersion++;
                         } catch (fetchError) {
                             // Network error (failed to fetch, timeout, etc)
                             throw new Error("Network error: " + fetchError.message);
