@@ -287,15 +287,16 @@ async def _ensure_vendor_assets() -> None:
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'ui', 'vendor'
     )
     base = 'https://unpkg.com'
+    # woff2 only: Font Awesome 6 dropped the legacy .woff files, so asking for
+    # them 404s on every boot forever (the download is only skipped once the
+    # file exists on disk). all.min.css lists woff2 first and every browser
+    # since 2016 takes it.
     assets = [
         ('vue/vue.global.js', f'{base}/vue@3/dist/vue.global.js'),
         ('fa/css/all.min.css', f'{base}/@fortawesome/fontawesome-free@6.0.0/css/all.min.css'),
         ('fa/webfonts/fa-solid-900.woff2', f'{base}/@fortawesome/fontawesome-free@6.0.0/webfonts/fa-solid-900.woff2'),
-        ('fa/webfonts/fa-solid-900.woff', f'{base}/@fortawesome/fontawesome-free@6.0.0/webfonts/fa-solid-900.woff'),
         ('fa/webfonts/fa-regular-400.woff2', f'{base}/@fortawesome/fontawesome-free@6.0.0/webfonts/fa-regular-400.woff2'),
-        ('fa/webfonts/fa-regular-400.woff', f'{base}/@fortawesome/fontawesome-free@6.0.0/webfonts/fa-regular-400.woff'),
         ('fa/webfonts/fa-brands-400.woff2', f'{base}/@fortawesome/fontawesome-free@6.0.0/webfonts/fa-brands-400.woff2'),
-        ('fa/webfonts/fa-brands-400.woff', f'{base}/@fortawesome/fontawesome-free@6.0.0/webfonts/fa-brands-400.woff'),
     ]
 
     missing = [(p, u) for p, u in assets if not os.path.exists(os.path.join(vendor_dir, p))]
