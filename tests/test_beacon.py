@@ -1,4 +1,5 @@
 """Tests for Beacon probe discovery, flashing, and fleet integration."""
+import os
 import pytest
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -185,9 +186,11 @@ class TestFlashBeacon:
 
         asyncio.get_event_loop().run_until_complete(collect())
 
+        # os.path.join, so the separator follows the host OS (the suite also
+        # runs on Windows dev machines, where it is a backslash).
         mock_run.assert_called_once_with([
             "python3",
-            "/home/pi/beacon_klipper/update_firmware.py",
+            os.path.join(beacon_path, "update_firmware.py"),
             "update",
             device_id,
         ])

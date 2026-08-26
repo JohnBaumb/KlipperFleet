@@ -10,6 +10,11 @@ from asyncio.subprocess import Process
 
 logger = logging.getLogger('klipperfleet.flash')
 
+try:
+    from backend.process_utils import terminate
+except ImportError:  # local (non-package) import path, see main.py
+    from process_utils import terminate
+
 
 class FlashManager:
     def __init__(self, klipper_dir: str, katapult_dir: str) -> None:
@@ -208,68 +213,78 @@ class FlashManager:
     async def discover_dfu_devices(self) -> List[Dict[str, str]]:
         """Lists all devices in DFU mode using dfu-util -l."""
         async with self._dfu_lock:
-            now: float = asyncio.get_event_loop().time()
-            if (now - self._dfu_cache_time) < self._dfu_cache_ttl_s:
-                return list(self._dfu_cache)
+            return await self._discover_dfu_devices_locked()
 
-            devices: List[Dict[str, str]] = []
-            try:
-                process: Process = await asyncio.create_subprocess_exec(
-                    'sudo',
-                    'dfu-util',
-                    '-l',
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, _ = await process.communicate()
-                lines: List[str] = stdout.decode().splitlines()
+    async def _discover_dfu_devices_locked(self) -> List[Dict[str, str]]:
+        """discover_dfu_devices() without taking the lock.
 
-                # Example line: Found DFU: [0483:df11] ver=0200, devnum=12, cfg=1, intf=0, path="1-1.2", alt=0, name="@Internal Flash  /0x08000000/064*0002Kg", serial="357236543131"
-                for line in lines:
-                    if 'Found DFU:' in line:
-                        # Extract VID:PID
-                        vid_pid: str = ''
-                        if '[' in line and ']' in line:
-                            vid_pid = line.split('[')[1].split(']')[0]
+        Callers that already hold _dfu_lock must use this: asyncio.Lock is not
+        reentrant, so re-entering through the public method deadlocks the task
+        against itself and leaves the lock held forever. That is what a DFU
+        flash retry used to do.
+        """
+        now: float = asyncio.get_event_loop().time()
+        if (now - self._dfu_cache_time) < self._dfu_cache_ttl_s:
+            return list(self._dfu_cache)
 
-                        serial: str = ''
-                        if 'serial="' in line:
-                            serial = line.split('serial="')[1].split('"')[0]
+        devices: List[Dict[str, str]] = []
+        try:
+            process: Process = await asyncio.create_subprocess_exec(
+                'sudo',
+                'dfu-util',
+                '-l',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await process.communicate()
+            lines: List[str] = stdout.decode().splitlines()
 
-                        path: str = ''
-                        if 'path="' in line:
-                            path = line.split('path="')[1].split('"')[0]
+            # Example line: Found DFU: [0483:df11] ver=0200, devnum=12, cfg=1, intf=0, path="1-1.2", alt=0, name="@Internal Flash  /0x08000000/064*0002Kg", serial="357236543131"
+            for line in lines:
+                if 'Found DFU:' in line:
+                    # Extract VID:PID
+                    vid_pid: str = ''
+                    if '[' in line and ']' in line:
+                        vid_pid = line.split('[')[1].split(']')[0]
 
-                        name: str = f'DFU Device ({vid_pid})'
-                        if serial:
-                            name += f' S/N: {serial}'
+                    serial: str = ''
+                    if 'serial="' in line:
+                        serial = line.split('serial="')[1].split('"')[0]
 
-                        # Use serial or path as ID for disambiguation
-                        dev_id: str = (
-                            serial if (serial and serial != 'UNKNOWN') else path
-                        )
+                    path: str = ''
+                    if 'path="' in line:
+                        path = line.split('path="')[1].split('"')[0]
 
-                        # Deduplicate (dfu-util lists multiple alt settings per device)
-                        if any(d['id'] == dev_id for d in devices):
-                            continue
+                    name: str = f'DFU Device ({vid_pid})'
+                    if serial:
+                        name += f' S/N: {serial}'
 
-                        devices.append(
-                            {
-                                'id': dev_id,
-                                'name': name,
-                                'type': 'dfu',
-                                'vid_pid': vid_pid,
-                                'path': path,
-                                'serial': serial,
-                                'mode': 'ready',
-                            }
-                        )
-            except Exception as e:
-                logger.error('Error discovering DFU devices: %s', e)
+                    # Use serial or path as ID for disambiguation
+                    dev_id: str = (
+                        serial if (serial and serial != 'UNKNOWN') else path
+                    )
 
-            self._dfu_cache = list(devices)
-            self._dfu_cache_time = now
-            return list(devices)
+                    # Deduplicate (dfu-util lists multiple alt settings per device)
+                    if any(d['id'] == dev_id for d in devices):
+                        continue
+
+                    devices.append(
+                        {
+                            'id': dev_id,
+                            'name': name,
+                            'type': 'dfu',
+                            'vid_pid': vid_pid,
+                            'path': path,
+                            'serial': serial,
+                            'mode': 'ready',
+                        }
+                    )
+        except Exception as e:
+            logger.error('Error discovering DFU devices: %s', e)
+
+        self._dfu_cache = list(devices)
+        self._dfu_cache_time = now
+        return list(devices)
 
     async def _get_moonraker_mcus(self) -> Dict[str, Dict[str, str]]:
         """Queries Moonraker for configured MCUs and their current status."""
@@ -1450,19 +1465,22 @@ class FlashManager:
             stderr=asyncio.subprocess.STDOUT,
         )
 
-        while True:
-            if process.stdout is None:
-                break
-            chunk: bytes = await process.stdout.read(128)
-            if not chunk:
-                break
-            yield chunk.decode(errors='replace')
+        try:
+            while True:
+                if process.stdout is None:
+                    break
+                chunk: bytes = await process.stdout.read(128)
+                if not chunk:
+                    break
+                yield chunk.decode(errors='replace')
 
-        await process.wait()
-        if process.returncode == 0:
-            yield '>>> Flashing successful!\n'
-        else:
-            yield f'>>> Flashing failed with return code {process.returncode}\n'
+            await process.wait()
+            if process.returncode == 0:
+                yield '>>> Flashing successful!\n'
+            else:
+                yield f'>>> Flashing failed with return code {process.returncode}\n'
+        finally:
+            await terminate(process)
 
     async def flash_can(
         self, uuid: str, firmware_path: str, interface: str = 'can0'
@@ -1503,6 +1521,25 @@ class FlashManager:
     ) -> AsyncGenerator[str, None]:
         """Flashes a device in DFU mode using dfu-util."""
         yield f'>>> Flashing {firmware_path} via DFU to {address} (Leave: {leave})...\n'
+
+        # Refuse to write firmware to a board we cannot name. dfu-util selects
+        # by VID:PID (0483:df11), so with several STM32s sitting in DFU it picks
+        # one arbitrarily, and the wrong firmware at the wrong offset bricks the
+        # board. One device on the bus is unambiguous; more than one needs a
+        # selector we can trust.
+        present = await self.discover_dfu_devices()
+        if len(present) > 1 and not any(
+            d['id'] == device_id or d.get('serial') == device_id
+            for d in present
+        ):
+            yield (
+                f'!!! Refusing to flash: {len(present)} devices are in DFU mode '
+                f"and none matches '{device_id}'. dfu-util would pick one at "
+                'random. Detach the others, or attach the correct DFU ID to '
+                'this device in the fleet, then retry.\n'
+            )
+            yield '>>> Flashing failed with return code 1\n'
+            return
 
         # Prevent concurrent dfu-util calls (like UI polling dfu-util -l) while flashing.
         async with self._dfu_lock:
@@ -1554,9 +1591,11 @@ class FlashManager:
                     if attempt > 0:
                         yield f'>>> Retry attempt {attempt + 1}/{max_retries}...\n'
                         await asyncio.sleep(2)
-                        # Re-resolve DFU device ID in case USB re-enumerated
+                        # Re-resolve DFU device ID in case USB re-enumerated.
+                        # _locked: we are inside `async with self._dfu_lock`
+                        # already, and the lock is not reentrant.
                         self._dfu_cache_time = 0.0
-                        new_devs = await self.discover_dfu_devices()
+                        new_devs = await self._discover_dfu_devices_locked()
                         if new_devs:
                             # Rebuild the command with the potentially new device ID
                             cmd = [
@@ -1571,17 +1610,19 @@ class FlashManager:
                                 '-D',
                                 firmware_path,
                             ]
-                            resolved = new_devs[
-                                0
-                            ]  # Best effort: pick the first DFU device
-                            for d in new_devs:
-                                if (
-                                    d['id'] == device_id
+                            # Only re-target a device we can actually match.
+                            # Picking new_devs[0] "best effort" meant a retry
+                            # could silently jump to a different board.
+                            resolved = next(
+                                (
+                                    d
+                                    for d in new_devs
+                                    if d['id'] == device_id
                                     or d.get('serial') == device_id
-                                ):
-                                    resolved = d
-                                    break
-                            rid = resolved['id']
+                                ),
+                                new_devs[0] if len(new_devs) == 1 else None,
+                            )
+                            rid = resolved['id'] if resolved else None
                             if (
                                 rid
                                 and len(rid) > 5
@@ -1759,33 +1800,35 @@ class FlashManager:
         stall_timeout_s = 120  # 2 minutes without output
         start_time = time.monotonic()
         timed_out_msg: Optional[str] = None
-        while process.stdout is not None:
-            if time.monotonic() - start_time > flash_timeout_s:
-                timed_out_msg = f'timed out after {flash_timeout_s}s'
-                break
-            try:
-                # Read in chunks to handle progress bars (\r)
-                chunk: bytes = await asyncio.wait_for(
-                    process.stdout.read(128), timeout=stall_timeout_s
-                )
-            except asyncio.TimeoutError:
-                timed_out_msg = f'stalled (no output for {stall_timeout_s}s)'
-                break
-            if not chunk:
-                break
-            yield chunk.decode(errors='replace')
+        try:
+            while process.stdout is not None:
+                if time.monotonic() - start_time > flash_timeout_s:
+                    timed_out_msg = f'timed out after {flash_timeout_s}s'
+                    break
+                try:
+                    # Read in chunks to handle progress bars (\r)
+                    chunk: bytes = await asyncio.wait_for(
+                        process.stdout.read(128), timeout=stall_timeout_s
+                    )
+                except asyncio.TimeoutError:
+                    timed_out_msg = f'stalled (no output for {stall_timeout_s}s)'
+                    break
+                if not chunk:
+                    break
+                yield chunk.decode(errors='replace')
 
-        if timed_out_msg:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
+            if timed_out_msg:
+                await terminate(process)
+                yield f'>>> Flashing {timed_out_msg}. Check that the device is on the bus and the ID is correct.\n'
+                return
+
             await process.wait()
-            yield f'>>> Flashing {timed_out_msg}. Check that the device is on the bus and the ID is correct.\n'
-            return
-
-        await process.wait()
-        if process.returncode in ok_returncodes:
-            yield '>>> Flashing successful!\n'
-        else:
-            yield f'>>> Flashing failed with return code {process.returncode}\n'
+            if process.returncode in ok_returncodes:
+                yield '>>> Flashing successful!\n'
+            else:
+                yield f'>>> Flashing failed with return code {process.returncode}\n'
+        finally:
+            # Closing the browser tab mid-flash throws GeneratorExit in here.
+            # Without this the dfu-util/flashtool process keeps running detached,
+            # holding the CAN or DFU lock against every later operation.
+            await terminate(process)
