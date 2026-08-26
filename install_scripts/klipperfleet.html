@@ -3,7 +3,31 @@
 <head><title>Redirecting to KlipperFleet…</title></head>
 <body>
 <script>
-window.location.replace(window.location.protocol + '//' + window.location.hostname + ':8321');
+// Deployed as /printer-klipperfleet.html (not /klipperfleet.html): over HTTPS,
+// Mainsail's PWA service worker swallows navigations to unknown paths and
+// serves its own SPA instead (issue #39). Its navigateFallback denylist,
+// ^/(access|api|printer|server|websocket), lets anything starting with
+// "printer" through to nginx, while nginx's Moonraker route
+// ^/(printer|api|access|machine|server)/ requires a slash after the word
+// and so still serves this file statically. Same trick applies to the
+// /printer-klipperfleet/ reverse-proxy path probed below.
+// The backend is HTTP-only on :8321; behind a TLS proxy that port is
+// unreachable or protocol-mismatched, so probe for a proxy location on
+// this origin first. The Content-Type check rejects SPA fallbacks that
+// answer unknown paths with 200 text/html.
+function direct() {
+    window.location.replace('http://' + window.location.hostname + ':8321');
+}
+fetch('/printer-klipperfleet/api/status')
+    .then(function (r) {
+        var ct = r.headers.get('content-type') || '';
+        if (r.ok && ct.indexOf('application/json') !== -1) {
+            window.location.replace('/printer-klipperfleet/');
+        } else {
+            direct();
+        }
+    })
+    .catch(direct);
 </script>
 <noscript><p>JavaScript is required. Visit <a href="http://localhost:8321">KlipperFleet</a> manually.</p></noscript>
 </body>

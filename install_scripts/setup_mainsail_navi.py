@@ -3,8 +3,10 @@
 
 Usage: python3 setup_mainsail_navi.py <navi.json path>
 
-The href points to /klipperfleet.html, a redirect shim that preserves whatever
-hostname or IP the user used to reach Mainsail.
+The href points to /printer-klipperfleet.html, a redirect shim that preserves whatever
+hostname or IP the user used to reach Mainsail. The name must start with
+"printer" (no slash after it) so Mainsail's PWA service worker lets the
+navigation reach nginx over HTTPS instead of serving its own SPA (issue #39).
 
 Idempotent: removes any existing KlipperFleet entry before adding the current one.
 """
@@ -22,7 +24,7 @@ def main():
 
     entry = {
         "title": "KlipperFleet",
-        "href": "/klipperfleet.html",
+        "href": "/printer-klipperfleet.html",
         "target": "_self",
         "icon": "M20,21V19L17,16H13V13H16V11H13V8H16V6H13V3H11V6H8V8H11V11H8V13H11V16H7L4,19V21H20Z",
         "position": 86,

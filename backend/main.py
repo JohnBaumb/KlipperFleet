@@ -42,6 +42,7 @@ async def lifespan(application: FastAPI):
     """Startup / shutdown hooks for KlipperFleet."""
     await _migrate_moonraker_conf()
     await _ensure_mainsail_shim()
+    await _ensure_navi_entry()
     await _ensure_sudoers()
     await _ensure_system_deps()
     await _ensure_vendor_assets()
@@ -155,17 +156,21 @@ async def _migrate_moonraker_conf() -> None:
 
 
 async def _ensure_mainsail_shim() -> None:
-    """Redeploy the /klipperfleet.html redirect shim into Mainsail's web root.
+    """Redeploy the /printer-klipperfleet.html redirect shim into Mainsail's web root.
 
     The shim lives inside Mainsail's own directory, which Mainsail wipes on every
     self-update — while the navi.json entry pointing at it survives. Without this,
     the sidebar link falls through to Mainsail's SPA router and just reloads
     Mainsail. install.sh only runs on install, so we re-heal it on every startup.
+
+    Deployed as printer-klipperfleet.html: the name must start with "printer" (no slash
+    after it) so Mainsail's PWA service worker denylist lets the navigation
+    reach nginx over HTTPS instead of serving Mainsail's SPA (issue #39).
     """
     repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     src = os.path.join(repo_dir, 'install_scripts', 'klipperfleet.html')
     mainsail_root = os.path.expanduser('~/mainsail')
-    dst = os.path.join(mainsail_root, 'klipperfleet.html')
+    dst = os.path.join(mainsail_root, 'printer-klipperfleet.html')
     try:
         if not os.path.isdir(mainsail_root):
             return  # Mainsail not installed here; nothing to heal.
@@ -178,6 +183,46 @@ async def _ensure_mainsail_shim() -> None:
             logger.info('Redeployed KlipperFleet redirect shim into Mainsail web root.')
     except Exception:
         logger.debug('Mainsail shim heal skipped (non-fatal)', exc_info=True)
+
+
+async def _ensure_navi_entry() -> None:
+    """Keep the Mainsail sidebar entry pointing at the current shim path.
+
+    navi.json lives in printer_data/config/.theme and is only written by
+    install.sh, so updates applied through Moonraker's update manager never
+    refresh the href. Re-run the idempotent navi setup whenever the entry is
+    missing or points at an old shim path.
+    """
+    mainsail_root = os.path.expanduser('~/mainsail')
+    navi = os.path.expanduser('~/printer_data/config/.theme/navi.json')
+    try:
+        if not os.path.isdir(mainsail_root):
+            return  # Mainsail not installed here; nothing to heal.
+        try:
+            with open(navi, encoding='utf-8') as f:
+                entries = json.load(f)
+            if any(
+                isinstance(e, dict) and e.get('href') == '/printer-klipperfleet.html'
+                for e in entries
+            ):
+                return
+        except (OSError, ValueError):
+            pass
+        repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        script = os.path.join(
+            repo_dir, 'install_scripts', 'setup_mainsail_navi.py'
+        )
+        os.makedirs(os.path.dirname(navi), exist_ok=True)
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, script, navi,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+        if proc.returncode == 0:
+            logger.info('Healed Mainsail navi.json sidebar entry.')
+    except Exception:
+        logger.debug('Mainsail navi heal skipped (non-fatal)', exc_info=True)
 
 
 async def _ensure_sudoers() -> None:
