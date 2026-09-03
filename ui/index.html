@@ -5,7 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>KlipperFleet</title>
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
-    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <!-- Vue is vendored into ui/vendor/ on first boot (see _ensure_vendor_assets).
+         Loading it only from the CDN meant a printer with no internet served a
+         blank page. document.write is deliberate: the fallback has to run
+         synchronously, before the app script below. -->
+    <script src="vendor/vue/vue.global.js"></script>
+    <script>window.Vue || document.write('<scr' + 'ipt src="https://unpkg.com/vue@3/dist/vue.global.js"><\/scr' + 'ipt>');</script>
     <link rel="stylesheet" href="tailwind.built.css">
     <link rel="stylesheet" href="vendor/fa/css/all.min.css">
     <style>
@@ -1446,7 +1451,7 @@
                     }
                 };
 
-                const startBuild = async (profileName = null, customMakeCommand = null) => {
+                const startBuild = async (profileName = null, deviceId = null) => {
                     const target = profileName || selectedProfile.value;
                     if (!target) return;
                     
@@ -1460,9 +1465,16 @@
                     buildLogs.value += `>>> Starting build for ${target}...\n`;
                     
                     try {
-                        let url = `/build/${target}`;
-                        if (customMakeCommand) url += `?custom_make_command=${encodeURIComponent(customMakeCommand)}`;
-                        const response = await fetch(url);
+                        // POST + device_id: the custom make command is read from
+                        // fleet.json server-side. Sending it in the URL made any page
+                        // the user visits able to run shell on the printer.
+                        let url = `build/${encodeURIComponent(target)}`;
+                        if (deviceId) url += `?device_id=${encodeURIComponent(deviceId)}`;
+                        const response = await fetch(url, { method: 'POST' });
+                        if (!response.ok) {
+                            const detail = await response.json().catch(() => ({}));
+                            throw new Error(detail.detail || `Build request failed (${response.status})`);
+                        }
                         currentTaskId.value = response.headers.get('X-Task-Id');
 
                         const reader = response.body.getReader();
@@ -1489,20 +1501,24 @@
                     buildLogs.value += `>>> Starting batch operation: ${action}...\n`;
                     
                     try {
-                        const res = await fetch(`batch/${action}`);
+                        const res = await fetch(`batch/${action}`, { method: 'POST' });
+                        if (!res.ok) {
+                            const detail = await res.json().catch(() => ({}));
+                            throw new Error(detail.detail || `Batch request failed (${res.status})`);
+                        }
                         const { task_id } = await res.json();
                         currentTaskId.value = task_id;
                         
                         let lastLogIndex = 0;
                         while (true) {
-                            const statusRes = await fetch(`task/status/${task_id}`);
+                            // Ask only for lines we have not shown yet; the whole
+                            // log used to come back on every one-second poll.
+                            const statusRes = await fetch(`task/status/${task_id}?since=${lastLogIndex}`);
                             const task = await statusRes.json();
-                            
-                            if (task.logs.length > lastLogIndex) {
-                                for (let i = lastLogIndex; i < task.logs.length; i++) {
-                                    buildLogs.value += task.logs[i];
-                                }
-                                lastLogIndex = task.logs.length;
+
+                            if (task.logs.length > 0) {
+                                buildLogs.value += task.logs.join('');
+                                lastLogIndex += task.logs.length;
                                 scrollToBottom();
                                 // Refresh fleet status when new logs arrive to show real-time status changes
                                 fetchFleetThrottled();
@@ -1591,6 +1607,10 @@
                                 use_magic_baud: useMagicBaud
                             })
                         });
+                        if (!response.ok) {
+                            const detail = await response.json().catch(() => ({}));
+                            throw new Error(detail.detail || `Flash request failed (${response.status})`);
+                        }
 
                         currentTaskId.value = response.headers.get('X-Task-Id');
 
@@ -1694,7 +1714,7 @@
                         return;
                     }
                     view.value = 'dashboard';
-                    await startBuild(dev.profile, dev.custom_make_command);
+                    await startBuild(dev.profile, dev.id);
                     if (taskCancelled.value) return;
                     await startFlash(dev.profile, dev.id, dev.method, dev.dfu_id);
                 };
@@ -1705,7 +1725,7 @@
                         return;
                     }
                     view.value = 'dashboard';
-                    await startBuild(dev.profile, dev.custom_make_command);
+                    await startBuild(dev.profile, dev.id);
                 };
 
                 const quickFlashOnly = async (dev) => {
@@ -1735,13 +1755,17 @@
                     const modeText = mode === 'katapult' ? 'Katapult' : 'Regular';
                     buildLogs.value += `>>> Requesting ${modeText} reboot for ${deviceId}...\n`;
                     
-                    let url = `/flash/reboot?device_id=${encodeURIComponent(deviceId)}&mode=${mode}`;
-                    if (method) url += `&method=${method}`;
-                    
+                    let url = `flash/reboot?device_id=${encodeURIComponent(deviceId)}&mode=${encodeURIComponent(mode)}`;
+                    if (method) url += `&method=${encodeURIComponent(method)}`;
+
                     try {
                         const response = await fetch(url, {
                             method: 'POST'
                         });
+                        if (!response.ok) {
+                            const detail = await response.json().catch(() => ({}));
+                            throw new Error(detail.detail || `Reboot request failed (${response.status})`);
+                        }
 
                         currentTaskId.value = response.headers.get('X-Task-Id');
 

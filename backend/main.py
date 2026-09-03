@@ -37,17 +37,34 @@ except Exception:
     from fleet_manager import FleetManager
 
 
+async def _startup_heals() -> None:
+    """Self-healing steps that must not delay the first request.
+
+    These run off the startup path because uvicorn does not accept connections
+    until lifespan startup returns: the vendor download alone can hold the port
+    closed for minutes on a slow or filtered network, which reads as "the
+    service is broken" right after an install.
+    """
+    for heal in (
+        _migrate_moonraker_conf,
+        _ensure_mainsail_shim,
+        _ensure_navi_entry,
+        _ensure_sudoers,
+        _ensure_vendor_assets,
+        flash_mgr.refresh_beacon_path,
+    ):
+        try:
+            await heal()
+        except Exception:
+            logger.debug('Startup heal %s failed', heal.__name__, exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Startup / shutdown hooks for KlipperFleet."""
-    await _migrate_moonraker_conf()
-    await _ensure_mainsail_shim()
-    await _ensure_navi_entry()
-    await _ensure_sudoers()
-    await _ensure_system_deps()
-    await _ensure_vendor_assets()
-    await flash_mgr.refresh_beacon_path()
+    heals = asyncio.create_task(_startup_heals())
     yield
+    heals.cancel()
 
 
 app = FastAPI(
@@ -254,77 +271,32 @@ async def _ensure_sudoers() -> None:
         logger.debug('Sudoers self-heal skipped (non-fatal)', exc_info=True)
 
 
-async def _ensure_system_deps() -> None:
-    """Install missing system packages listed in system-dependencies.json."""
-    repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    deps_file = os.path.join(
-        repo_dir, 'install_scripts', 'system-dependencies.json'
-    )
-    try:
-        with open(deps_file, 'r') as f:
-            data = json.load(f)
-        packages = data.get('debian', [])
-        missing = []
-        for pkg in packages:
-            check = await asyncio.create_subprocess_exec(
-                'dpkg-query',
-                '-W',
-                '-f=${Status}',
-                pkg,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await check.communicate()
-            status = stdout.decode().strip() if stdout else ''
-            if check.returncode != 0 or 'install ok installed' not in status:
-                missing.append(pkg)
-        if not missing:
-            return
-        logger.info(
-            f'Missing system packages detected: {missing}. Installing...'
-        )
-        proc = await asyncio.create_subprocess_exec(
-            'sudo',
-            'apt-get',
-            'install',
-            '-y',
-            *missing,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode == 0:
-            logger.info(f'Successfully installed system packages: {missing}')
-        else:
-            logger.warning(
-                f'apt-get install failed (rc={proc.returncode}): {stderr.decode().strip()}'
-            )
-    except Exception:
-        logger.debug(
-            'System dependency check skipped (non-fatal)', exc_info=True
-        )
-
-
 async def _ensure_vendor_assets() -> None:
-    """Download Font Awesome vendor assets on first boot if missing.
+    """Download vendor assets on first boot if missing.
 
-    Uses unpkg.com (already trusted — Vue loads from there) so Pi-hole rules
-    that block cdnjs.cloudflare.com don't interfere.
-    Files land in ui/vendor/ which is gitignored.
+    Uses unpkg.com so Pi-hole rules that block cdnjs.cloudflare.com don't
+    interfere. Files land in ui/vendor/ which is gitignored.
     Tailwind CSS is pre-built and committed as ui/tailwind.built.css (no download needed).
+
+    Vue is vendored too: it is the framework the whole UI is built on, so
+    loading it from a CDN at runtime meant a printer with no internet served a
+    blank page. index.html falls back to the CDN only while this file is still
+    missing (i.e. the very first boot).
     """
     vendor_dir = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'ui', 'vendor'
     )
     base = 'https://unpkg.com'
+    # woff2 only: Font Awesome 6 dropped the legacy .woff files, so asking for
+    # them 404s on every boot forever (the download is only skipped once the
+    # file exists on disk). all.min.css lists woff2 first and every browser
+    # since 2016 takes it.
     assets = [
+        ('vue/vue.global.js', f'{base}/vue@3/dist/vue.global.js'),
         ('fa/css/all.min.css', f'{base}/@fortawesome/fontawesome-free@6.0.0/css/all.min.css'),
         ('fa/webfonts/fa-solid-900.woff2', f'{base}/@fortawesome/fontawesome-free@6.0.0/webfonts/fa-solid-900.woff2'),
-        ('fa/webfonts/fa-solid-900.woff', f'{base}/@fortawesome/fontawesome-free@6.0.0/webfonts/fa-solid-900.woff'),
         ('fa/webfonts/fa-regular-400.woff2', f'{base}/@fortawesome/fontawesome-free@6.0.0/webfonts/fa-regular-400.woff2'),
-        ('fa/webfonts/fa-regular-400.woff', f'{base}/@fortawesome/fontawesome-free@6.0.0/webfonts/fa-regular-400.woff'),
         ('fa/webfonts/fa-brands-400.woff2', f'{base}/@fortawesome/fontawesome-free@6.0.0/webfonts/fa-brands-400.woff2'),
-        ('fa/webfonts/fa-brands-400.woff', f'{base}/@fortawesome/fontawesome-free@6.0.0/webfonts/fa-brands-400.woff'),
     ]
 
     missing = [(p, u) for p, u in assets if not os.path.exists(os.path.join(vendor_dir, p))]
@@ -448,25 +420,47 @@ def validate_profile_name(name: str) -> None:
         )
 
 
+def profile_config_path(profile_name: str) -> str:
+    """The .config path for a profile, validated.
+
+    Every path built from a user-supplied profile name goes through here (or
+    artifact_path below) so the traversal guard cannot be forgotten at a new
+    call site. That is exactly how /flash and POST /config/tree ended up
+    unvalidated.
+    """
+    validate_profile_name(profile_name)
+    return os.path.join(PROFILES_DIR, f'{profile_name}.config')
+
+
+def artifact_path(profile_name: str, ext: str) -> str:
+    """The artifact path for a profile + extension, validated."""
+    validate_profile_name(profile_name)
+    return os.path.join(ARTIFACTS_DIR, f'{profile_name}{ext}')
+
+
 def resolve_firmware_path(profile_name: str, method: str) -> Optional[str]:
     """Resolve firmware path for a profile. AVR uses .elf, others prefer .bin."""
     if method == 'linux':
-        path = os.path.join(ARTIFACTS_DIR, f'{profile_name}.elf')
+        path = artifact_path(profile_name, '.elf')
         return path if os.path.exists(path) else None
 
     # Prefer .bin (ARM/STM32 boards), fall back to .uf2 (RP2040), then .elf (AVR boards)
     for ext in ('.bin', '.uf2', '.elf'):
-        path = os.path.join(ARTIFACTS_DIR, f'{profile_name}{ext}')
+        path = artifact_path(profile_name, ext)
         if os.path.exists(path):
             return path
     return None
 
 
 def _read_profile_config(profile_name: str) -> Optional[str]:
-    """Returns the raw .config content for a profile, or None if unavailable."""
-    config_path = os.path.join(PROFILES_DIR, f'{profile_name}.config')
+    """Returns the raw .config content for a profile, or None if unavailable.
+
+    Best-effort: a bad name reads as "no config" rather than raising, because
+    callers classify fleet entries during batch runs where an HTTP error would
+    abort the whole operation.
+    """
     try:
-        with open(config_path, 'r') as f:
+        with open(profile_config_path(profile_name), 'r') as f:
             return f.read()
     except Exception:
         return None
@@ -599,36 +593,35 @@ def skip_reason(status: str, device: Dict[str, Any]) -> str:
     return status
 
 
-def get_flash_offset(profile_name: str) -> str:
-    """Extracts the flash offset address from a profile's .config file."""
-    config_path: str = os.path.join(PROFILES_DIR, f'{profile_name}.config')
-    if not os.path.exists(config_path):
-        return '0x08000000'
+# STM32 flash base. Klipper spells the bootloader offset as a hex suffix on the
+# symbol name (CONFIG_FLASH_START_2000, CONFIG_STM32_FLASH_START_8000, ...), so
+# read the number instead of keeping a table that silently misses new options.
+_STM32_FLASH_BASE = 0x08000000
+_FLASH_START_RE = re.compile(r'_FLASH_START_([0-9A-Fa-f]+)=y')
 
-    # Common Klipper offsets (handles both CONFIG_FLASH_START and CONFIG_STM32_FLASH_START)
-    offsets: Dict[str, str] = {
-        '_FLASH_START_800': '0x08000800',  # 2KiB
-        '_FLASH_START_2000': '0x08002000',  # 8KiB
-        '_FLASH_START_4000': '0x08004000',  # 16KiB
-        '_FLASH_START_8000': '0x08008000',  # 32KiB
-        '_FLASH_START_10000': '0x08010000',  # 64KiB
-        '_FLASH_START_20000': '0x08020000',  # 128KiB
-        '_FLASH_START_0': '0x08000000',
-    }
+_NO_OFFSET_MSG = (
+    "!!! Refusing to DFU flash: profile '{profile}' declares no bootloader "
+    'offset (CONFIG_..._FLASH_START_*). Flashing at the default 0x08000000 '
+    'would erase the bootloader. Set the bootloader offset in the '
+    'configurator and rebuild.\n'
+)
 
-    try:
-        with open(config_path, 'r') as f:
-            content: str = f.read()
-            for key, addr in offsets.items():
-                if f'{key}=y' in content:
-                    return addr
-    except Exception:
-        logger.warning(
-            'Failed to read config file %s for bootloader offset, using default',
-            config_path,
-            exc_info=True,
-        )
-    return '0x08000000'
+
+def get_flash_offset(profile_name: str) -> Optional[str]:
+    """The DFU flash offset for a profile, or None if the profile does not
+    declare one.
+
+    Returns None rather than guessing: 0x08000000 is the bootloader's own
+    address, so a wrong default erases Katapult and bricks the board. Callers
+    must refuse to flash when this returns None.
+    """
+    content = _read_profile_config(profile_name)
+    if content is None:
+        return None
+    match = _FLASH_START_RE.search(content)
+    if not match:
+        return None
+    return f'0x{_STM32_FLASH_BASE + int(match.group(1), 16):08x}'
 
 
 class TaskStore:
@@ -697,6 +690,33 @@ class TaskStore:
 
 task_store = TaskStore()
 
+# Single-flight guard for anything that touches the printer or the Klipper
+# source tree: builds copy the profile over ~/klipper/.config, and flashes stop
+# and restart the Klipper services. Two overlapping runs corrupt each other:
+# the first run's finally-block restarts Klipper while the second is still
+# mid-flash. A plain flag is enough: check-and-set is synchronous, so the event
+# loop cannot interleave two claims.
+_hardware_busy: Optional[str] = None
+
+
+def _claim_hardware(what: str) -> None:
+    """Reserve the printer/build tree, or 409 if a run is already in progress."""
+    global _hardware_busy
+    if _hardware_busy is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Busy: '{_hardware_busy}' is already running. Wait for it to "
+                'finish or cancel it first.'
+            ),
+        )
+    _hardware_busy = what
+
+
+def _release_hardware() -> None:
+    global _hardware_busy
+    _hardware_busy = None
+
 
 class ConfigValue(BaseModel):
     name: str
@@ -753,32 +773,33 @@ class AttachRequest(BaseModel):
     method: str
 
 
+async def _git_output(repo_dir: str, *args: str) -> Optional[str]:
+    """Run a git command and return its trimmed stdout, or None on failure."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            'git',
+            *args,
+            cwd=repo_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        if proc.returncode == 0:
+            return stdout.decode().strip()
+    except Exception:
+        logger.debug('git %s failed in %s', ' '.join(args), repo_dir)
+    return None
+
+
 @app.get('/api/status')
 async def get_status() -> Dict[str, Any]:
     repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    commit = 'unknown'
-    branch = 'unknown'
-    try:
-        result = subprocess.run(
-            ['git', 'rev-parse', '--short', 'HEAD'],
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            commit = result.stdout.strip()
-        br = subprocess.run(
-            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if br.returncode == 0:
-            branch = br.stdout.strip()
-    except Exception:
-        pass
+    # Async: the UI polls this, and a blocking subprocess.run here stalls every
+    # other request on the single event loop.
+    commit = await _git_output(repo_dir, 'rev-parse', '--short', 'HEAD')
+    branch = await _git_output(repo_dir, 'rev-parse', '--abbrev-ref', 'HEAD')
+    commit = commit or 'unknown'
+    branch = branch or 'unknown'
     return {
         'message': 'KlipperFleet API is running',
         'klipper_dir': KLIPPER_DIR,
@@ -937,30 +958,16 @@ async def post_config_tree(
     """Returns the Kconfig tree with unsaved values applied for live preview."""
     config_path: Optional[str] = None
     if preview.profile:
-        config_path = os.path.join(PROFILES_DIR, f'{preview.profile}.config')
+        config_path = profile_config_path(preview.profile)
         if not os.path.exists(config_path):
             raise HTTPException(
                 status_code=404, detail=f"Profile '{preview.profile}' not found"
             )
 
     try:
-        await kconfig_mgr.load_kconfig(config_path)
-        # Apply unsaved values in multiple passes to handle deep dependencies
-        for i in range(10):
-            for item in preview.values:
-                try:
-                    kconfig_mgr.set_value(item.name, item.value)
-                except Exception:
-                    # Expected: values may fail on early passes due to unresolved dependencies.
-                    # They will succeed on later passes as cascading deps resolve.
-                    if i == 9:
-                        logger.debug(
-                            'Kconfig value %s=%s still failing after final pass',
-                            item.name,
-                            item.value,
-                        )
-
-        return kconfig_mgr.get_menu_tree(show_optional=preview.show_optional)
+        return await kconfig_mgr.build_menu_tree(
+            config_path, preview.values, show_optional=preview.show_optional
+        )
     except FileNotFoundError:
         raise HTTPException(
             status_code=404,
@@ -989,31 +996,14 @@ async def save_profile(profile: ProfileSave) -> Dict[str, str]:
     try:
         config_path: Optional[str] = None
         if profile.base_profile:
-            config_path = os.path.join(
-                PROFILES_DIR, f'{profile.base_profile}.config'
-            )
+            config_path = profile_config_path(profile.base_profile)
             if not os.path.exists(config_path):
                 config_path = None
 
-        await kconfig_mgr.load_kconfig(config_path)
-        # Apply values in multiple passes (matching the preview endpoint) to
-        # handle cascading 'select' dependencies, e.g. choosing a CAN bridge
-        # communication interface triggers select USBCANBUS which must resolve
-        # before save, otherwise the old value (USBSERIAL) persists.
-        for i in range(10):
-            for item in profile.values:
-                try:
-                    kconfig_mgr.set_value(item.name, item.value)
-                except Exception:
-                    if i == 9:
-                        logger.debug(
-                            'Kconfig value %s=%s still failing after final save pass',
-                            item.name,
-                            item.value,
-                        )
-
-        save_path: str = os.path.join(PROFILES_DIR, f'{profile.name}.config')
-        kconfig_mgr.save_config(save_path)
+        save_path: str = profile_config_path(profile.name)
+        await kconfig_mgr.apply_and_save(
+            config_path, profile.values, save_path
+        )
         return {'message': f'Profile {profile.name} saved successfully'}
     except FileNotFoundError:
         raise HTTPException(
@@ -1065,7 +1055,7 @@ async def get_profiles_info() -> Dict[str, Dict[str, bool]]:
 async def delete_profile(name: str) -> Dict[str, str]:
     """Deletes a saved configuration profile."""
     validate_profile_name(name)
-    config_path: str = os.path.join(PROFILES_DIR, f'{name}.config')
+    config_path: str = profile_config_path(name)
     if os.path.exists(config_path):
         os.remove(config_path)
         return {'message': f'Profile {name} deleted successfully'}
@@ -1084,8 +1074,8 @@ async def rename_profile(name: str, body: ProfileRename) -> Dict[str, str]:
     if name == body.new_name:
         return {'message': 'Name unchanged'}
 
-    old_path = os.path.join(PROFILES_DIR, f'{name}.config')
-    new_path = os.path.join(PROFILES_DIR, f'{body.new_name}.config')
+    old_path = profile_config_path(name)
+    new_path = profile_config_path(body.new_name)
 
     if not os.path.exists(old_path):
         raise HTTPException(
@@ -1112,25 +1102,50 @@ async def rename_profile(name: str, body: ProfileRename) -> Dict[str, str]:
     return {'message': f"Profile renamed from '{name}' to '{body.new_name}'"}
 
 
-@app.get('/build/{profile}')
-async def build_profile(profile: str, custom_make_command: Optional[str] = None) -> StreamingResponse:
-    """Starts a build for the specified profile and streams the output."""
-    validate_profile_name(profile)
-    task_id: str = f'task_{uuid.uuid4().hex[:12]}'
-    task_store.create_task(task_id)
+async def _custom_make_command_for(device_id: Optional[str]) -> Optional[str]:
+    """The custom build command stored on a fleet device, if any.
 
-    config_path: str = os.path.join(PROFILES_DIR, f'{profile}.config')
+    The command is read from fleet.json, never from the request. It reaches
+    `bash -c`, so accepting it as a query parameter turned every page the user
+    visits into a remote shell on the printer (GET, so no CORS in the way).
+    Editing it still goes through POST /fleet/device like any other setting.
+    """
+    if not device_id:
+        return None
+    for dev in await fleet_mgr.get_fleet():
+        if dev.get('id') == device_id:
+            return dev.get('custom_make_command') or None
+    return None
+
+
+@app.post('/build/{profile}')
+async def build_profile(
+    profile: str, device_id: Optional[str] = None
+) -> StreamingResponse:
+    """Starts a build for the specified profile and streams the output."""
+    config_path: str = profile_config_path(profile)
     if not os.path.exists(config_path):
         raise HTTPException(
             status_code=404, detail=f"Profile '{profile}' not found"
         )
 
+    custom_make_command = await _custom_make_command_for(device_id)
+
+    _claim_hardware(f'build {profile}')
+    task_id: str = f'task_{uuid.uuid4().hex[:12]}'
+    task_store.create_task(task_id)
+
     async def generate() -> AsyncGenerator[str, None]:
-        async for log in build_mgr.run_build(config_path, custom_make_command=custom_make_command):
-            if task_store.is_cancelled(task_id):
-                break
-            yield log
-        task_store.complete_task(task_id)
+        try:
+            async for log in build_mgr.run_build(
+                config_path, custom_make_command=custom_make_command
+            ):
+                if task_store.is_cancelled(task_id):
+                    break
+                yield log
+        finally:
+            task_store.complete_task(task_id)
+            _release_hardware()
 
     return StreamingResponse(
         generate(), media_type='text/plain', headers={'X-Task-Id': task_id}
@@ -1263,11 +1278,19 @@ async def services_manage(action: str) -> Dict[str, str]:
 
 
 @app.get('/task/status/{task_id}')
-async def get_task_status(task_id: str):
+async def get_task_status(task_id: str, since: int = 0):
+    """Task state, with logs from index `since` onward.
+
+    The UI polls this once a second and already tracks how much it has shown,
+    so returning the whole log array every time re-sent the entire build log
+    hundreds of times over a long run.
+    """
     task = task_store.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail='Task not found')
-    return task
+    logs: List[str] = task['logs']
+    since = max(0, min(since, len(logs)))
+    return {**task, 'logs': logs[since:], 'log_offset': since}
 
 
 @app.post('/task/cancel/{task_id}')
@@ -1279,11 +1302,30 @@ async def cancel_task_operation(task_id: str) -> Dict[str, str]:
     return {'message': 'Cancellation requested'}
 
 
-@app.get('/batch/{action}')
+# The batch runner keys off substrings of the action ('build' in action,
+# 'flash' in action), so an unrecognised action used to return a task_id and
+# then silently do nothing. Only these combinations exist in the UI.
+BATCH_ACTIONS = (
+    'build',
+    'flash-ready',
+    'flash-all',
+    'build-flash-ready',
+    'build-flash-all',
+)
+
+
+@app.post('/batch/{action}')
 async def batch_operation(
     action: str, background_tasks: BackgroundTasks
 ) -> Dict[str, str]:
     """Performs batch operations (build, flash-ready, flash-all, etc.)"""
+    if action not in BATCH_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown batch action '{action}'. Expected one of: "
+            f'{", ".join(BATCH_ACTIONS)}.',
+        )
+    _claim_hardware(f'batch {action}')
     task_id: str = f'task_{uuid.uuid4().hex[:12]}'
     task_store.create_task(task_id)
 
@@ -1391,9 +1433,7 @@ async def batch_operation(
                             task_id,
                             f'\n>>> BATCH BUILD: Starting {label}...\n',
                         )
-                        config_path: str = os.path.join(
-                            PROFILES_DIR, f'{profile}.config'
-                        )
+                        config_path: str = profile_config_path(profile)
                         build_success = True
                         async for log in build_mgr.run_build(config_path, custom_make_command=custom_cmd):
                             if task_store.is_cancelled(task_id):
@@ -1968,8 +2008,8 @@ async def batch_operation(
                         try:
                             if flashes_directly(dev):
                                 # Direct-flash device — flash via make flash (handles AVR, SAM, etc.)
-                                config_path: str = os.path.join(
-                                    PROFILES_DIR, f'{dev["profile"]}.config'
+                                config_path: str = profile_config_path(
+                                    dev['profile']
                                 )
                                 async for log in flash_mgr.flash_make(
                                     dev['id'], firmware_path, config_path
@@ -2021,13 +2061,30 @@ async def batch_operation(
                                         batch_flash_ok = True
                                     task_store.add_log(task_id, log)
                             elif dev['method'] == 'dfu':
+                                # strict: this ID is about to receive firmware.
+                                # The loose "only one DFU device, must be the
+                                # target" guess is fine for a status readout,
+                                # not for choosing what to overwrite.
                                 resolved_id: str = (
                                     await flash_mgr.resolve_dfu_id(
                                         dev['id'],
                                         known_dfu_id=dev.get('dfu_id'),
+                                        strict=True,
                                     )
                                 )
-                                offset: str = get_flash_offset(dev['profile'])
+                                offset: Optional[str] = get_flash_offset(
+                                    dev['profile']
+                                )
+                                if offset is None:
+                                    task_store.add_log(
+                                        task_id, _NO_OFFSET_MSG.format(
+                                            profile=dev['profile']
+                                        )
+                                    )
+                                    flash_results[dev['name']] = (
+                                        'FAILED (no bootloader offset)'
+                                    )
+                                    continue
                                 async for log in flash_mgr.flash_dfu(
                                     resolved_id,
                                     firmware_path,
@@ -2210,6 +2267,7 @@ async def batch_operation(
                     task_id, await manage_klipper_services('start')
                 )
             task_store.complete_task(task_id)
+            _release_hardware()
 
     background_tasks.add_task(run_task)
     return {'task_id': task_id}
@@ -2537,6 +2595,7 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             'Wait for the print to finish or cancel it first.',
         )
 
+    _claim_hardware(f'flash {req.device_id}')
     task_id: str = f'task_{uuid.uuid4().hex[:12]}'
     task_store.create_task(task_id)
     task_store.tasks[task_id]['is_bus_task'] = True
@@ -2579,6 +2638,7 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                 if services_stopped:
                     yield await manage_klipper_services('start')
                 task_store.complete_task(task_id)
+                _release_hardware()
 
         return StreamingResponse(
             generate_beacon(),
@@ -2586,14 +2646,20 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             headers={'X-Task-Id': task_id},
         )
 
-    firmware_path: Optional[str] = resolve_firmware_path(
-        req.profile, req.method
-    )
-    if firmware_path is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Firmware for profile '{req.profile}' not found. Please build first.",
+    try:
+        firmware_path: Optional[str] = resolve_firmware_path(
+            req.profile, req.method
         )
+        if firmware_path is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Firmware for profile '{req.profile}' not found. Please build first.",
+            )
+    except Exception:
+        # The claim is only released by the streaming generator, which never
+        # starts if we bail out here.
+        _release_hardware()
+        raise
 
     async def generate() -> AsyncGenerator[str, None]:
         services_stopped = False
@@ -2808,18 +2874,19 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                 yield f'>>> Auto-correcting: {target_id} is a serial path, switching from CAN to serial flash.\n'
                 actual_method = 'serial'
 
-            # If the initial check already found it in DFU mode, lock to DFU immediately
+            # If the initial check already found it in DFU mode, lock to DFU immediately.
+            # strict: the resolved ID selects what gets overwritten.
             if status == 'dfu':
                 resolved_dfu_id: str = await flash_mgr.resolve_dfu_id(
-                    req.device_id, known_dfu_id=req.dfu_id
+                    req.device_id, known_dfu_id=req.dfu_id, strict=True
                 )
                 target_id = resolved_dfu_id
                 actual_method = 'dfu'
                 yield f'>>> Device detected in DFU mode. Switching to DFU flash method.\n'
             elif req.method in ['serial', 'dfu']:
-                # Check DFU status first
+                # Check DFU status first (strict: picks the flash target)
                 resolved_dfu_id: str = await flash_mgr.resolve_dfu_id(
-                    req.device_id, known_dfu_id=req.dfu_id
+                    req.device_id, known_dfu_id=req.dfu_id, strict=True
                 )
                 dfu_devs: List[
                     Dict[str, str]
@@ -2858,9 +2925,7 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             try:
                 if actual_method == 'serial' and flashes_direct:
                     # Direct-flash device — flash via make flash (handles AVR, SAM, etc.)
-                    config_path: str = os.path.join(
-                        PROFILES_DIR, f'{req.profile}.config'
-                    )
+                    config_path: str = profile_config_path(req.profile)
                     async for log in flash_mgr.flash_make(
                         target_id, firmware_path, config_path
                     ):
@@ -2891,7 +2956,10 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                             flash_succeeded = True
                         yield log
                 elif actual_method == 'dfu':
-                    offset: str = get_flash_offset(req.profile)
+                    offset: Optional[str] = get_flash_offset(req.profile)
+                    if offset is None:
+                        yield _NO_OFFSET_MSG.format(profile=req.profile)
+                        return
                     async for log in flash_mgr.flash_dfu(
                         target_id,
                         firmware_path,
@@ -2957,6 +3025,7 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             if services_stopped:
                 yield await manage_klipper_services('start')
             task_store.complete_task(task_id)
+            _release_hardware()
 
     return StreamingResponse(
         generate(), media_type='text/plain', headers={'X-Task-Id': task_id}
@@ -2977,6 +3046,7 @@ async def reboot_device(
             'Wait for the print to finish or cancel it first.',
         )
 
+    _claim_hardware(f'reboot {device_id}')
     task_id: str = f'task_{uuid.uuid4().hex[:12]}'
     task_store.create_task(task_id)
     task_store.tasks[task_id]['is_bus_task'] = True
@@ -2993,18 +3063,21 @@ async def reboot_device(
     serial_id: Optional[str] = dev.get('serial_id')
 
     async def generate() -> AsyncGenerator[str, None]:
-        async for log in flash_mgr.reboot_device(
-            device_id,
-            mode,
-            method=actual_method,
-            interface=interface,
-            is_bridge=is_bridge,
-            serial_id=serial_id,
-        ):
-            if task_store.is_cancelled(task_id):
-                break
-            yield log
-        task_store.complete_task(task_id)
+        try:
+            async for log in flash_mgr.reboot_device(
+                device_id,
+                mode,
+                method=actual_method,
+                interface=interface,
+                is_bridge=is_bridge,
+                serial_id=serial_id,
+            ):
+                if task_store.is_cancelled(task_id):
+                    break
+                yield log
+        finally:
+            task_store.complete_task(task_id)
+            _release_hardware()
 
     return StreamingResponse(
         generate(), media_type='text/plain', headers={'X-Task-Id': task_id}
@@ -3016,6 +3089,7 @@ async def test_magic_baud(
     device_id: str, full_cycle: bool = False
 ) -> StreamingResponse:
     """Tests the 1200bps magic baud trick on a device, optionally testing the full cycle."""
+    _claim_hardware(f'DFU cycle test {device_id}')
     task_id: str = f'task_{uuid.uuid4().hex[:12]}'
     task_store.create_task(task_id)
 
@@ -3092,6 +3166,7 @@ async def test_magic_baud(
                 yield '!!! TIMEOUT: Device did not return to serial mode. You may need to manually reset it.\n'
         finally:
             task_store.complete_task(task_id)
+            _release_hardware()
 
     return StreamingResponse(
         generate(), media_type='text/plain', headers={'X-Task-Id': task_id}

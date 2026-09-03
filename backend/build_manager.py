@@ -9,6 +9,11 @@ from asyncio.subprocess import Process
 
 logger = logging.getLogger('klipperfleet.build')
 
+try:
+    from backend.process_utils import terminate
+except ImportError:  # local (non-package) import path, see main.py
+    from process_utils import terminate
+
 
 class BuildManager:
     def __init__(self, klipper_dir: str, artifacts_dir: str) -> None:
@@ -138,94 +143,96 @@ class BuildManager:
                 stderr=asyncio.subprocess.STDOUT,
             )
 
-        assert process.stdout is not None
-        build_timeout_s = 600  # 10 minutes total
-        stall_timeout_s = 120  # 2 minutes without output
-        start_time = time.monotonic()
-        timed_out = False
-        while True:
-            elapsed = time.monotonic() - start_time
-            if elapsed > build_timeout_s:
-                timed_out = True
-                yield f'!!! Build timed out after {build_timeout_s}s\n'
-                break
-            try:
-                line: bytes = await asyncio.wait_for(
-                    process.stdout.readline(), timeout=stall_timeout_s
-                )
-            except asyncio.TimeoutError:
-                timed_out = True
-                yield f'!!! Build stalled (no output for {stall_timeout_s}s)\n'
-                break
-            if not line:
-                break
-            yield line.decode()
+        try:
+            assert process.stdout is not None
+            build_timeout_s = 600  # 10 minutes total
+            stall_timeout_s = 120  # 2 minutes without output
+            start_time = time.monotonic()
+            timed_out = False
+            while True:
+                elapsed = time.monotonic() - start_time
+                if elapsed > build_timeout_s:
+                    timed_out = True
+                    yield f'!!! Build timed out after {build_timeout_s}s\n'
+                    break
+                try:
+                    line: bytes = await asyncio.wait_for(
+                        process.stdout.readline(), timeout=stall_timeout_s
+                    )
+                except asyncio.TimeoutError:
+                    timed_out = True
+                    yield f'!!! Build stalled (no output for {stall_timeout_s}s)\n'
+                    break
+                if not line:
+                    break
+                yield line.decode()
 
-        if timed_out:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
+            if timed_out:
+                await terminate(process)
+                return
+
             await process.wait()
-            return
+            if process.returncode == 0:
+                yield '>>> Build successful!\n'
 
-        await process.wait()
-        if process.returncode == 0:
-            yield '>>> Build successful!\n'
+                # Get version info for this build
+                version_info = await self.get_klipper_version()
+                yield f'>>> Klipper version: {version_info["version"]} ({version_info["commit"]})\n'
 
-            # Get version info for this build
-            version_info = await self.get_klipper_version()
-            yield f'>>> Klipper version: {version_info["version"]} ({version_info["commit"]})\n'
-
-            # Copy artifacts to persistent storage
-            bin_src: str = os.path.join(self.klipper_dir, 'out', 'klipper.bin')
-            elf_src: str = os.path.join(self.klipper_dir, 'out', 'klipper.elf')
-            hex_src: str = os.path.join(
-                self.klipper_dir, 'out', 'klipper.elf.hex'
-            )
-            uf2_src: str = os.path.join(self.klipper_dir, 'out', 'klipper.uf2')
-
-            if os.path.exists(bin_src):
-                shutil.copy(
-                    bin_src,
-                    os.path.join(self.artifacts_dir, f'{profile_name}.bin'),
+                # Copy artifacts to persistent storage
+                bin_src: str = os.path.join(self.klipper_dir, 'out', 'klipper.bin')
+                elf_src: str = os.path.join(self.klipper_dir, 'out', 'klipper.elf')
+                hex_src: str = os.path.join(
+                    self.klipper_dir, 'out', 'klipper.elf.hex'
                 )
-                yield f'>>> Saved artifact: {profile_name}.bin\n'
-            if os.path.exists(elf_src):
-                shutil.copy(
-                    elf_src,
-                    os.path.join(self.artifacts_dir, f'{profile_name}.elf'),
-                )
-                yield f'>>> Saved artifact: {profile_name}.elf\n'
-            if os.path.exists(hex_src):
-                shutil.copy(
-                    hex_src,
-                    os.path.join(self.artifacts_dir, f'{profile_name}.elf.hex'),
-                )
-                yield f'>>> Saved artifact: {profile_name}.elf.hex\n'
-            if os.path.exists(uf2_src):
-                shutil.copy(
-                    uf2_src,
-                    os.path.join(self.artifacts_dir, f'{profile_name}.uf2'),
-                )
-                yield f'>>> Saved artifact: {profile_name}.uf2\n'
+                uf2_src: str = os.path.join(self.klipper_dir, 'out', 'klipper.uf2')
 
-            # Store build info for later retrieval
-            self._last_build_info[profile_name] = {
-                'version': version_info['version'],
-                'commit': version_info['commit'],
-                'date': version_info['date'],
-                'built_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-            }
+                if os.path.exists(bin_src):
+                    shutil.copy(
+                        bin_src,
+                        os.path.join(self.artifacts_dir, f'{profile_name}.bin'),
+                    )
+                    yield f'>>> Saved artifact: {profile_name}.bin\n'
+                if os.path.exists(elf_src):
+                    shutil.copy(
+                        elf_src,
+                        os.path.join(self.artifacts_dir, f'{profile_name}.elf'),
+                    )
+                    yield f'>>> Saved artifact: {profile_name}.elf\n'
+                if os.path.exists(hex_src):
+                    shutil.copy(
+                        hex_src,
+                        os.path.join(self.artifacts_dir, f'{profile_name}.elf.hex'),
+                    )
+                    yield f'>>> Saved artifact: {profile_name}.elf.hex\n'
+                if os.path.exists(uf2_src):
+                    shutil.copy(
+                        uf2_src,
+                        os.path.join(self.artifacts_dir, f'{profile_name}.uf2'),
+                    )
+                    yield f'>>> Saved artifact: {profile_name}.uf2\n'
 
-            # Save build info to a JSON file for persistence
-            build_info_path = os.path.join(
-                self.artifacts_dir, f'{profile_name}.build_info.json'
-            )
-            with open(build_info_path, 'w') as f:
-                json.dump(self._last_build_info[profile_name], f, indent=2)
-        else:
-            yield f'>>> Build failed with return code {process.returncode}\n'
+                # Store build info for later retrieval
+                self._last_build_info[profile_name] = {
+                    'version': version_info['version'],
+                    'commit': version_info['commit'],
+                    'date': version_info['date'],
+                    'built_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                }
+
+                # Save build info to a JSON file for persistence
+                build_info_path = os.path.join(
+                    self.artifacts_dir, f'{profile_name}.build_info.json'
+                )
+                with open(build_info_path, 'w') as f:
+                    json.dump(self._last_build_info[profile_name], f, indent=2)
+            else:
+                yield f'>>> Build failed with return code {process.returncode}\n'
+        finally:
+            # The client closing the tab throws GeneratorExit at the yield above.
+            # Without this, `make -j4` keeps compiling detached and the next
+            # build races it over ~/klipper/out.
+            await terminate(process)
 
     async def _run_command(self, cmd: list, timeout: int = 60) -> None:
         process: Optional[Process] = None

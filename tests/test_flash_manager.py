@@ -612,7 +612,15 @@ class TestFlashCommandTimeout:
         proc = MagicMock()
         proc.stdout = MagicMock()
         proc.wait = AsyncMock(return_value=-9)
-        proc.kill = MagicMock()
+        # Behave like a real Process: returncode is None while running and is
+        # set once killed, so the cleanup in the finally block is a no-op the
+        # second time around rather than killing an already-reaped pid.
+        proc.returncode = None
+
+        def _kill():
+            proc.returncode = -9
+
+        proc.kill = MagicMock(side_effect=_kill)
 
         # wait_for raising TimeoutError == flashtool.py sitting silent on a dead UUID.
         with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),              patch("asyncio.wait_for", AsyncMock(side_effect=asyncio.TimeoutError)):
