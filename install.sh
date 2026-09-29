@@ -146,6 +146,9 @@ if [ -d "$MAINSAIL_ROOT" ]; then
     cp "${SRCDIR}/install_scripts/klipperfleet.html" "$MAINSAIL_ROOT/printer-klipperfleet.html"
     chown "$USER:$USER_GROUP" "$MAINSAIL_ROOT/printer-klipperfleet.html"
     chmod 644 "$MAINSAIL_ROOT/printer-klipperfleet.html"
+    # Drop the shim we shipped before issue #39 renamed it. The navi entry no
+    # longer points at it, so an upgrade would leave it orphaned forever.
+    rm -f "$MAINSAIL_ROOT/klipperfleet.html"
 else
     log_warn "Mainsail web root not found at $MAINSAIL_ROOT; redirect shim not deployed."
 fi
