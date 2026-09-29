@@ -54,7 +54,78 @@ class KconfigManager:
     async def load_kconfig(self, config_file: Optional[str] = None) -> None:
         """Loads the Kconfig file and optionally an existing .config file."""
         async with self._kconfig_lock:
-            self._load_kconfig_sync(config_file)
+            await asyncio.to_thread(self._load_kconfig_sync, config_file)
+
+    # Klipper's Kconfig resolves 'select' statements lazily, so a value set on
+    # one pass can unlock the symbol another value needs. Ten passes is enough
+    # for the deepest chain Klipper has (e.g. CAN bridge -> select USBCANBUS).
+    _RESOLUTION_PASSES = 10
+
+    def _apply_values(self, values: List[Any]) -> None:
+        """Apply (name, value) pairs repeatedly until cascading deps resolve."""
+        for i in range(self._RESOLUTION_PASSES):
+            for item in values:
+                try:
+                    self.set_value(item.name, item.value)
+                except Exception:
+                    # Expected on early passes while dependencies are still
+                    # unresolved; only the final pass is worth reporting.
+                    if i == self._RESOLUTION_PASSES - 1:
+                        logger.debug(
+                            'Kconfig value %s=%s still failing after final pass',
+                            item.name,
+                            item.value,
+                        )
+
+    async def build_menu_tree(
+        self,
+        config_file: Optional[str],
+        values: List[Any],
+        show_optional: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Load, apply unsaved values, and serialize the tree as one unit.
+
+        Parsing Klipper's Kconfig plus ten passes of set_value is heavy enough
+        to stall every other request if it runs on the event loop, so it goes
+        to a worker thread. The lock is held across the whole load-apply-read
+        sequence because all three steps share self.kconf.
+        """
+        async with self._kconfig_lock:
+            return await asyncio.to_thread(
+                self._build_menu_tree_sync, config_file, values, show_optional
+            )
+
+    def _build_menu_tree_sync(
+        self,
+        config_file: Optional[str],
+        values: List[Any],
+        show_optional: bool,
+    ) -> List[Dict[str, Any]]:
+        self._load_kconfig_sync(config_file)
+        self._apply_values(values)
+        return self.get_menu_tree(show_optional=show_optional)
+
+    async def apply_and_save(
+        self,
+        config_file: Optional[str],
+        values: List[Any],
+        output_path: str,
+    ) -> None:
+        """Load, apply values, and write the resulting .config as one unit."""
+        async with self._kconfig_lock:
+            await asyncio.to_thread(
+                self._apply_and_save_sync, config_file, values, output_path
+            )
+
+    def _apply_and_save_sync(
+        self,
+        config_file: Optional[str],
+        values: List[Any],
+        output_path: str,
+    ) -> None:
+        self._load_kconfig_sync(config_file)
+        self._apply_values(values)
+        self.save_config(output_path)
 
     def _run_firmware_extras_script(self, klipper_dir: str) -> None:
         """Run Kalico's find-firmware-extras.sh if present to generate src/extras/Kconfig.

@@ -4,12 +4,19 @@ on:
   push:
     branches: [dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 jobs:
   test:
     runs-on: ubuntu-latest
-    
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 is the floor advertised in the README; 3.13 catches the modern
+        # asyncio behaviour (closed event loops) that 3.9 silently tolerates.
+        python-version: ['3.9', '3.13']
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -17,7 +24,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.9'
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: |

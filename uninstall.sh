@@ -85,22 +85,24 @@ fi
 echo "KlipperFleet: Removing Mainsail navigation entry..."
 NAVI_JSON="${MOONRAKER_CONFIG_DIR}/.theme/navi.json"
 if [ -f "$NAVI_JSON" ]; then
-    # This is a bit tricky with sed because of JSON formatting. 
-    # We'll use a temporary file to rebuild the JSON without the KlipperFleet entry.
-    # We look for the line containing "KlipperFleet" and remove it, then fix commas.
-    
-    # 1. Remove the line containing KlipperFleet
-    sed -i '/"title": "KlipperFleet"/d' "$NAVI_JSON"
-    
-    # 2. Fix potential trailing commas or empty arrays
-    # Remove comma before the closing bracket if it exists
-    sed -i 'N;s/,\n\]/\n\]/;P;D' "$NAVI_JSON"
-    # If the array is now empty [ ], we can just remove the file or leave it as []
-    if [ "$(grep -c "{" "$NAVI_JSON")" -eq 0 ]; then
-        echo "[]" > "$NAVI_JSON"
+    # Edit the JSON as JSON. The old sed deleted only the `"title"` line, which
+    # left the rest of the object behind as a nameless sidebar entry pointing at
+    # a dead link, and risked mangling unrelated entries (e.g. KRASH).
+    if python3 "${SRCDIR}/install_scripts/setup_mainsail_navi.py" "$NAVI_JSON" --remove; then
+        :
+    else
+        echo "KlipperFleet: WARNING: could not edit ${NAVI_JSON}; remove the KlipperFleet entry by hand."
     fi
-    echo "KlipperFleet: Mainsail navigation entry removed."
 fi
+
+# 8. Remove Mainsail Redirect Shims
+echo "KlipperFleet: Removing Mainsail redirect shims..."
+for shim in "${USER_HOME}/mainsail/klipperfleet.html" "${USER_HOME}/mainsail/printer-klipperfleet.html"; do
+    if [ -f "$shim" ]; then
+        rm -f "$shim"
+        echo "KlipperFleet: Removed $shim"
+    fi
+done
 
 echo "KlipperFleet: Uninstallation complete."
 echo "Note: The repository at ${SRCDIR} has not been removed. You can delete it manually if desired."

@@ -4,10 +4,15 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>KlipperFleet</title>
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
-    <link rel="stylesheet" href="/tailwind.built.css">
-    <link rel="stylesheet" href="/vendor/fa/css/all.min.css">
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <!-- Vue is vendored into ui/vendor/ on first boot (see _ensure_vendor_assets).
+         Loading it only from the CDN meant a printer with no internet served a
+         blank page. document.write is deliberate: the fallback has to run
+         synchronously, before the app script below. -->
+    <script src="vendor/vue/vue.global.js"></script>
+    <script>window.Vue || document.write('<scr' + 'ipt src="https://unpkg.com/vue@3/dist/vue.global.js"><\/scr' + 'ipt>');</script>
+    <link rel="stylesheet" href="tailwind.built.css">
+    <link rel="stylesheet" href="vendor/fa/css/all.min.css">
     <style>
         body { background-color: #121212; color: #f0f0f0; }
         .kconfig-item { margin-left: 1.5rem; }
@@ -73,7 +78,7 @@
                 </div>
                 <div class="flex items-center text-[10px] text-gray-500">
                     <a href="https://github.com/JohnBaumb/KlipperFleet" target="_blank" rel="noopener noreferrer" class="hover:text-white transition-colors" title="KlipperFleet on GitHub">
-                        <i class="fa-brands fa-github mr-1"></i>v1.4.1-alpha
+                        <i class="fa-brands fa-github mr-1"></i>v1.5.0-alpha
                     </a>
                     <span v-if="currentBranch && currentBranch !== 'main'" class="ml-1 text-yellow-500">({{ currentBranch }})</span>
                     <span v-if="currentCommit" class="ml-auto text-gray-600">{{ currentCommit }}</span>
@@ -485,7 +490,8 @@
                                                     <i class="fas fa-circle text-[5px] mr-1"></i> {{ formatStatus(dev.status) }}
                                                 </span>
                                             </div>
-                                            <input v-model="dev.id" @focus="dev._oldId = dev.id" @change="updateFleetDevice(dev)" class="bg-transparent text-[10px] text-gray-400 font-mono focus:outline-none border-b border-transparent focus:border-gray-600 w-full truncate">
+                                            <!-- ponytail: :value + @change, not v-model. dev.id is the v-for key, so per-keystroke mutation would re-create this input and kill focus before @change fires. -->
+                                            <input :value="dev.id" @focus="dev._oldId = dev.id" @change="dev.id = $event.target.value; updateFleetDevice(dev)" class="bg-transparent text-[10px] text-gray-400 font-mono focus:outline-none border-b border-transparent focus:border-gray-600 w-full truncate">
                                         </div>
                                         <button @click="removeDeviceFromFleet(dev.id)" class="flex-none text-red-500 hover:text-red-400 text-xs">
                                             <i class="fas fa-trash"></i>
@@ -532,10 +538,16 @@
                                                 <span>CAN Bridge</span>
                                             </span>
                                         </div>
-                                        <label v-if="dev.method !== 'beacon'" class="flex items-center space-x-2 cursor-pointer group" :title="'This device will only be flashed when done individually. It will be skipped during Flash All, Build & Flash Ready, and Build & Flash All operations.'">
-                                            <input type="checkbox" v-model="dev.exclude_from_batch" @change="updateFleetDevice(dev)" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-orange-600 focus:ring-orange-500">
-                                            <span class="text-[10px] text-orange-400 group-hover:text-orange-300 uppercase font-bold">Exclude from Flash All</span>
-                                        </label>
+                                        <div v-if="dev.method !== 'beacon'" class="flex flex-col items-start space-y-2">
+                                            <label class="flex items-center space-x-2 cursor-pointer group" :class="{'opacity-60 cursor-not-allowed': dev.exclude_from_build}" :title="dev.exclude_from_build ? 'Required because this device is excluded from Build All.' : 'This device will only be flashed when done individually. It will be skipped during Flash All, Build & Flash Ready, and Build & Flash All operations.'">
+                                                <input type="checkbox" v-model="dev.exclude_from_batch" @change="updateFleetDevice(dev)" :disabled="dev.exclude_from_build" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-orange-600 focus:ring-orange-500 disabled:cursor-not-allowed">
+                                                <span class="text-[10px] text-orange-400 group-hover:text-orange-300 uppercase font-bold">Exclude from Flash All</span>
+                                            </label>
+                                            <label class="flex items-center space-x-2 cursor-pointer group" :title="'This device will not be compiled during Build All, Build & Flash Ready, or Build & Flash All operations and will also be excluded from batch flashing. Individual builds are unaffected.'">
+                                                <input type="checkbox" v-model="dev.exclude_from_build" @change="onExcludeFromBuildChange(dev)" class="h-3 w-3 rounded border-gray-700 bg-gray-900 text-orange-600 focus:ring-orange-500">
+                                                <span class="text-[10px] text-orange-400 group-hover:text-orange-300 uppercase font-bold">Exclude from Build All</span>
+                                            </label>
+                                        </div>
                                     </div>
                                     <div class="mt-3">
                                         <textarea v-model="dev.notes" @change="updateFleetDevice(dev)" 
@@ -921,6 +933,7 @@
                 const buildLogs = ref("");
                 const currentTaskId = ref(null);
                 const taskCancelled = ref(false);
+                let fleetMutationVersion = 0;
                 
                 // Computed property to parse color markers into HTML
                 const formattedLogs = computed(() => {
@@ -1059,7 +1072,7 @@
                     error.value = null;
                     try {
                         const values = Object.entries(modifiedValues.value).map(([name, value]) => ({ name, value }));
-                        const res = await fetch('/config/tree', {
+                        const res = await fetch('config/tree', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ 
@@ -1085,14 +1098,14 @@
                 };
 
                 const fetchProfiles = async () => {
-                    const res = await fetch('/profiles');
+                    const res = await fetch('profiles');
                     const data = await res.json();
                     profiles.value = data.profiles;
                 };
 
                 const fetchProfileInfo = async () => {
                     try {
-                        const res = await fetch('/profiles/info');
+                        const res = await fetch('profiles/info');
                         profileInfo.value = await res.json();
                         reconcileProfileFlags();
                     } catch (e) {
@@ -1116,7 +1129,7 @@
                             needsUpdate = true;
                         }
                         if (needsUpdate) {
-                            fetch('/fleet/device', {
+                            fetch('fleet/device', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify(dev)
@@ -1133,21 +1146,31 @@
                     return dev.profile && profileInfo.value[dev.profile]?.is_linux;
                 };
 
+                const applyFleetSnapshot = (snapshot, requestMutationVersion) => {
+                    if (requestMutationVersion !== fleetMutationVersion) return false;
+                    fleet.value = snapshot;
+                    return true;
+                };
+
                 const fetchFleet = async (fast = true) => {
+                    const requestMutationVersion = fleetMutationVersion;
                     querying.value = true;
                     try {
                         // Only do the "fast" load if requested and we don't have data or it's a manual refresh
                         if (fast && fleet.value.length === 0) {
-                            const fastRes = await fetch('/fleet?fast=true');
-                            fleet.value = await fastRes.json();
+                            const fastRes = await fetch('fleet?fast=true', { cache: 'no-store' });
+                            const fastSnapshot = await fastRes.json();
+                            if (!applyFleetSnapshot(fastSnapshot, requestMutationVersion)) return;
                         }
 
                         // Then, get the full status (this may be slow due to CAN discovery)
-                        const res = await fetch('/fleet');
-                        fleet.value = await res.json();
+                        const res = await fetch('fleet', { cache: 'no-store' });
+                        const snapshot = await res.json();
+                        if (!applyFleetSnapshot(snapshot, requestMutationVersion)) return;
 
                         // Fetch version info for devices
                         await fetchVersions();
+                        if (requestMutationVersion !== fleetMutationVersion) return;
 
                         // Reconcile profile-driven flags (CAN bridge, Linux)
                         reconcileProfileFlags();
@@ -1160,7 +1183,7 @@
 
                 const fetchVersions = async () => {
                     try {
-                        const res = await fetch('/fleet/versions');
+                        const res = await fetch('fleet/versions', { cache: 'no-store' });
                         deviceVersions.value = await res.json();
                     } catch (e) {
                         console.error("Failed to fetch versions", e);
@@ -1169,7 +1192,7 @@
 
                 const fetchKlipperVersion = async () => {
                     try {
-                        const res = await fetch('/firmware/version');
+                        const res = await fetch('firmware/version');
                         systemKlipperVersion.value = await res.json();
                     } catch (e) {
                         console.error("Failed to fetch firmware version", e);
@@ -1242,7 +1265,7 @@
 
                 const fetchPrintStatus = async () => {
                     try {
-                        const res = await fetch('/api/print_status');
+                        const res = await fetch('api/print_status');
                         const data = await res.json();
                         printing.value = data.printing;
                         printState.value = data.state;
@@ -1255,7 +1278,7 @@
 
                 const fetchServices = async () => {
                     try {
-                        const res = await fetch('/services/status');
+                        const res = await fetch('services/status');
                         services.value = await res.json();
                     } catch (e) {
                         console.error("Failed to fetch services", e);
@@ -1264,7 +1287,7 @@
 
                 const fetchSystemStatus = async () => {
                     try {
-                        const res = await fetch('/api/status');
+                        const res = await fetch('api/status');
                         const data = await res.json();
                         isKlipperKconfiglib.value = data.is_klipper_kconfiglib;
                         firmwareName.value = data.firmware_name || 'Klipper';
@@ -1279,7 +1302,7 @@
                 const manageServices = async (action) => {
                     buildLogs.value += `>>> Requesting services ${action}...\n`;
                     try {
-                        const res = await fetch(`/services/manage?action=${action}`, { method: 'POST' });
+                        const res = await fetch(`services/manage?action=${action}`, { method: 'POST' });
                         const data = await res.json();
                         buildLogs.value += data.message;
                         await fetchServices();
@@ -1291,7 +1314,7 @@
                 const discoverDevices = async () => {
                     querying.value = true;
                     try {
-                        const res = await fetch('/devices/discover');
+                        const res = await fetch('devices/discover');
                         devices.value = await res.json();
                     } catch (e) {
                         console.error("Failed to discover devices", e);
@@ -1335,7 +1358,7 @@
                     if (!name) return;
 
                     const values = Object.entries(modifiedValues.value).map(([name, value]) => ({ name, value }));
-                    const saveRes = await fetch('/config/save', {
+                    const saveRes = await fetch('config/save', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ name, values, base_profile })
@@ -1364,7 +1387,7 @@
                     if (!name || name === selectedProfile.value) return;
 
                     const values = Object.entries(modifiedValues.value).map(([name, value]) => ({ name, value }));
-                    await fetch('/config/save', {
+                    await fetch('config/save', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ 
@@ -1394,7 +1417,7 @@
                     if (!selectedProfile.value) return;
                     if (!await showConfirm("Delete Profile", `Are you sure you want to delete the profile "${selectedProfile.value}"?`)) return;
 
-                    await fetch(`/profiles/${selectedProfile.value}`, { method: 'DELETE' });
+                    await fetch(`profiles/${selectedProfile.value}`, { method: 'DELETE' });
                     selectedProfile.value = '';
                     modifiedValues.value = {};
                     fetchProfiles();
@@ -1408,7 +1431,7 @@
                     if (!newName || newName === selectedProfile.value) return;
 
                     try {
-                        const res = await fetch(`/profiles/${selectedProfile.value}/rename`, {
+                        const res = await fetch(`profiles/${selectedProfile.value}/rename`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ new_name: newName })
@@ -1428,7 +1451,7 @@
                     }
                 };
 
-                const startBuild = async (profileName = null, customMakeCommand = null) => {
+                const startBuild = async (profileName = null, deviceId = null) => {
                     const target = profileName || selectedProfile.value;
                     if (!target) return;
                     
@@ -1442,9 +1465,16 @@
                     buildLogs.value += `>>> Starting build for ${target}...\n`;
                     
                     try {
-                        let url = `/build/${target}`;
-                        if (customMakeCommand) url += `?custom_make_command=${encodeURIComponent(customMakeCommand)}`;
-                        const response = await fetch(url);
+                        // POST + device_id: the custom make command is read from
+                        // fleet.json server-side. Sending it in the URL made any page
+                        // the user visits able to run shell on the printer.
+                        let url = `build/${encodeURIComponent(target)}`;
+                        if (deviceId) url += `?device_id=${encodeURIComponent(deviceId)}`;
+                        const response = await fetch(url, { method: 'POST' });
+                        if (!response.ok) {
+                            const detail = await response.json().catch(() => ({}));
+                            throw new Error(detail.detail || `Build request failed (${response.status})`);
+                        }
                         currentTaskId.value = response.headers.get('X-Task-Id');
 
                         const reader = response.body.getReader();
@@ -1471,20 +1501,24 @@
                     buildLogs.value += `>>> Starting batch operation: ${action}...\n`;
                     
                     try {
-                        const res = await fetch(`/batch/${action}`);
+                        const res = await fetch(`batch/${action}`, { method: 'POST' });
+                        if (!res.ok) {
+                            const detail = await res.json().catch(() => ({}));
+                            throw new Error(detail.detail || `Batch request failed (${res.status})`);
+                        }
                         const { task_id } = await res.json();
                         currentTaskId.value = task_id;
                         
                         let lastLogIndex = 0;
                         while (true) {
-                            const statusRes = await fetch(`/task/status/${task_id}`);
+                            // Ask only for lines we have not shown yet; the whole
+                            // log used to come back on every one-second poll.
+                            const statusRes = await fetch(`task/status/${task_id}?since=${lastLogIndex}`);
                             const task = await statusRes.json();
-                            
-                            if (task.logs.length > lastLogIndex) {
-                                for (let i = lastLogIndex; i < task.logs.length; i++) {
-                                    buildLogs.value += task.logs[i];
-                                }
-                                lastLogIndex = task.logs.length;
+
+                            if (task.logs.length > 0) {
+                                buildLogs.value += task.logs.join('');
+                                lastLogIndex += task.logs.length;
                                 scrollToBottom();
                                 // Refresh fleet status when new logs arrive to show real-time status changes
                                 fetchFleetThrottled();
@@ -1506,7 +1540,7 @@
                     if (!currentTaskId.value) return;
                     taskCancelled.value = true;
                     try {
-                        await fetch(`/task/cancel/${currentTaskId.value}`, { method: 'POST' });
+                        await fetch(`task/cancel/${currentTaskId.value}`, { method: 'POST' });
                         buildLogs.value += `>>> Cancellation requested...\n`;
                     } catch (e) {
                         buildLogs.value += `!!! Failed to cancel: ${e.message}\n`;
@@ -1562,7 +1596,7 @@
                     buildLogs.value += `>>> Flashing ${profile} to ${deviceId}...\n`;
                     
                     try {
-                        const response = await fetch('/flash', {
+                        const response = await fetch('flash', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ 
@@ -1573,6 +1607,10 @@
                                 use_magic_baud: useMagicBaud
                             })
                         });
+                        if (!response.ok) {
+                            const detail = await response.json().catch(() => ({}));
+                            throw new Error(detail.detail || `Flash request failed (${response.status})`);
+                        }
 
                         currentTaskId.value = response.headers.get('X-Task-Id');
 
@@ -1624,7 +1662,7 @@
                     buildLogs.value += `>>> Starting DFU Cycle Test for ${dev.name}...\n`;
                     
                     try {
-                        const response = await fetch(`/debug/test_magic_baud?device_id=${encodeURIComponent(dev.id)}&full_cycle=true`, { method: 'POST' });
+                        const response = await fetch(`debug/test_magic_baud?device_id=${encodeURIComponent(dev.id)}&full_cycle=true`, { method: 'POST' });
                         currentTaskId.value = response.headers.get('X-Task-Id');
 
                         const reader = response.body.getReader();
@@ -1676,7 +1714,7 @@
                         return;
                     }
                     view.value = 'dashboard';
-                    await startBuild(dev.profile, dev.custom_make_command);
+                    await startBuild(dev.profile, dev.id);
                     if (taskCancelled.value) return;
                     await startFlash(dev.profile, dev.id, dev.method, dev.dfu_id);
                 };
@@ -1687,7 +1725,7 @@
                         return;
                     }
                     view.value = 'dashboard';
-                    await startBuild(dev.profile, dev.custom_make_command);
+                    await startBuild(dev.profile, dev.id);
                 };
 
                 const quickFlashOnly = async (dev) => {
@@ -1708,7 +1746,7 @@
                     view.value = 'dashboard';
                     await startBuild(profile);
                     if (taskCancelled.value) return;
-                    window.location.href = '/download/' + profile;
+                    window.location.href = 'download/' + profile;
                 };
 
                 const rebootDevice = async (deviceId, mode = 'katapult', method = null) => {
@@ -1717,13 +1755,17 @@
                     const modeText = mode === 'katapult' ? 'Katapult' : 'Regular';
                     buildLogs.value += `>>> Requesting ${modeText} reboot for ${deviceId}...\n`;
                     
-                    let url = `/flash/reboot?device_id=${encodeURIComponent(deviceId)}&mode=${mode}`;
-                    if (method) url += `&method=${method}`;
-                    
+                    let url = `flash/reboot?device_id=${encodeURIComponent(deviceId)}&mode=${encodeURIComponent(mode)}`;
+                    if (method) url += `&method=${encodeURIComponent(method)}`;
+
                     try {
                         const response = await fetch(url, {
                             method: 'POST'
                         });
+                        if (!response.ok) {
+                            const detail = await response.json().catch(() => ({}));
+                            throw new Error(detail.detail || `Reboot request failed (${response.status})`);
+                        }
 
                         currentTaskId.value = response.headers.get('X-Task-Id');
 
@@ -1791,6 +1833,7 @@
                         magic_baud_tested: false,
                         use_magic_baud: false,
                         exclude_from_batch: isBeacon,  // beacon uses update_firmware.py, not batch pipeline; always excluded
+                        exclude_from_build: false,
                         custom_make_command: null
                     };
 
@@ -1799,6 +1842,7 @@
                     const originalFleet = JSON.parse(JSON.stringify(fleet.value));
 
                     // Optimistic UI update: add fleet card immediately and mark device as managed in discovery
+                    fleetMutationVersion++;
                     fleet.value.push(newDevice);
 
                     ['beacon', 'serial', 'can', 'dfu', 'linux'].forEach(category => {
@@ -1811,11 +1855,12 @@
                     try {
                         let res;
                         try {
-                            res = await fetch('/fleet/device', {
+                            res = await fetch('fleet/device', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify(newDevice)
                             });
+                            fleetMutationVersion++;
                         } catch (fetchError) {
                             throw new Error("Network error: " + fetchError.message);
                         }
@@ -1861,7 +1906,7 @@
                     
                     const fleetDev = fleet.value.find(d => d.id === fleetId);
                     try {
-                        const res = await fetch('/fleet/attach', {
+                        const res = await fetch('fleet/attach', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
@@ -1878,26 +1923,37 @@
                     }
                 };
 
-                const updateFleetDevice = async (dev) => {
+                const updateFleetDevice = async (dev, refreshAfterSave = false) => {
+                    fleetMutationVersion++;
                     try {
                         const payload = { ...dev };
                         if (dev._oldId && dev._oldId !== dev.id) {
                             payload.old_id = dev._oldId;
                         }
-                        const res = await fetch('/fleet/device', {
+                        const res = await fetch('fleet/device', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify(payload)
                         });
+                        fleetMutationVersion++;
                         if (!res.ok) throw new Error("Failed to update device");
                         if (payload.old_id) {
                             dev._oldId = dev.id;
-                            await fetchFleet(); // Refresh to ensure IDs are synced
+                        }
+                        if (payload.old_id || refreshAfterSave) {
+                            await fetchFleet(false); // Refresh to ensure IDs are synced
                         }
                     } catch (e) {
                         await showAlert("Error", "Error: " + e.message);
                         await fetchFleet(); // Revert on error
                     }
+                };
+
+                const onExcludeFromBuildChange = async (dev) => {
+                    if (dev.exclude_from_build) {
+                        dev.exclude_from_batch = true;
+                    }
+                    await updateFleetDevice(dev, true);
                 };
 
                 const onDeviceProfileChange = async (dev) => {
@@ -1921,6 +1977,7 @@
                     const originalDevices = JSON.parse(JSON.stringify(devices.value));
 
                     // Optimistic UI update: immediately remove from fleet
+                    fleetMutationVersion++;
                     const idx = fleet.value.findIndex(d => d.id === id);
                     if (idx >= 0) {
                         fleet.value.splice(idx, 1);
@@ -1939,7 +1996,8 @@
                     try {
                         let res;
                         try {
-                            res = await fetch(`/fleet/device?device_id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+                            res = await fetch(`fleet/device?device_id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+                            fleetMutationVersion++;
                         } catch (fetchError) {
                             // Network error (failed to fetch, timeout, etc)
                             throw new Error("Network error: " + fetchError.message);
@@ -1967,7 +2025,7 @@
 
                 const fetchHealth = async () => {
                     try {
-                        const res = await fetch('/api/health');
+                        const res = await fetch('api/health');
                         const data = await res.json();
                         healthIssues.value = data.issues || [];
                         healthChecked.value = true;
@@ -1978,7 +2036,7 @@
 
                 const fetchUpdateCheck = async () => {
                     try {
-                        const res = await fetch('/api/update-check');
+                        const res = await fetch('api/update-check');
                         const data = await res.json();
                         updateAvailable.value = data.update_available || false;
                         commitsBehind.value = data.commits_behind || 0;
@@ -1991,7 +2049,7 @@
                     if (!await showConfirm("Self Update", "This will update KlipperFleet to the latest version, reinstall dependencies, and restart the service. Continue?")) return;
                     updating.value = true;
                     try {
-                        const res = await fetch('/api/self-update', { method: 'POST' });
+                        const res = await fetch('api/self-update', { method: 'POST' });
                         const data = await res.json();
                         await showAlert("Update Started", data.message);
                         // Wait a bit then reload
@@ -2013,7 +2071,7 @@
                 const exportBackup = async () => {
                     backupBusy.value = true;
                     try {
-                        const res = await fetch('/api/backup/export');
+                        const res = await fetch('api/backup/export');
                         if (!res.ok) throw new Error('Export failed');
                         const blob = await res.blob();
                         const url = URL.createObjectURL(blob);
@@ -2053,7 +2111,7 @@
                     backupBusy.value = true;
                     try {
                         const buf = await backupSelectedFile.value.arrayBuffer();
-                        const res = await fetch('/api/backup/import', {
+                        const res = await fetch('api/backup/import', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/octet-stream' },
                             body: buf
@@ -2097,7 +2155,7 @@
                     
                     loading.value = true;
                     try {
-                        await fetch('/config/save', {
+                        await fetch('config/save', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ name, values: [] })
@@ -2123,10 +2181,17 @@
                     if (document.referrer) {
                         try {
                             const referrerUrl = new URL(document.referrer);
-                            printerUrl.value = document.referrer;
+                            // Arriving via the reverse-proxy shim (same-origin hop), the
+                            // referrer is our own shim URL; "back" should go to Mainsail
+                            // at the origin root, not bounce through the shim again.
+                            if (referrerUrl.pathname.startsWith('/printer-klipperfleet')) {
+                                printerUrl.value = referrerUrl.origin + '/';
+                            } else {
+                                printerUrl.value = document.referrer;
+                            }
                             hasReferrer.value = true;
                             // Fetch printer UI name from KlipperFleet API (no CORS issues)
-                            fetch('/api/printer-ui?port=' + (referrerUrl.port || '80'))
+                            fetch('api/printer-ui?port=' + (referrerUrl.port || '80'))
                                 .then(r => r.json())
                                 .then(data => {
                                     if (data.uiName) {
@@ -2221,7 +2286,7 @@
                     view, sidebarOpen, configTree, profiles, fleet, selectedProfile, loading, refreshing, building, flashing, updating, querying, printing, printState, printFilename,
                     buildLogs, formattedLogs, expandLogs, expandLogsHeight, copyLogs, logsCopied, updateValue, saveProfile, saveProfileAs, newProfile, deleteProfile, renameProfile, loadProfile, createMissingProfile, startBuild, runBatch, selfUpdate,
                     devices, selectedDevice, discoverDevices, startFlash, quickFlash, quickBuild, quickFlashOnly, flashBeacon, beaconUpToDate, buildAndDownload, rebootDevice, statusColor, formatStatus,
-                    addDeviceToFleet, attachToFleet, updateFleetDevice, onDeviceProfileChange, removeDeviceFromFleet, error, modifiedValues, formatNotes,
+                    addDeviceToFleet, attachToFleet, updateFleetDevice, onExcludeFromBuildChange, onDeviceProfileChange, removeDeviceFromFleet, error, modifiedValues, formatNotes,
                     printerUrl, printerTitle, hasReferrer, profileInfo, isProfileCanBridge, isProfileLinux,
                     modal, showAlert, showConfirm, showPrompt, closeModal, testMagicBaud,
                     services, manageServices, cancelTask, currentTaskId,
@@ -2237,4 +2302,3 @@
     </script>
 </body>
 </html>
-

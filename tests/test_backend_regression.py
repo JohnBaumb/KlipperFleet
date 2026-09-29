@@ -719,6 +719,103 @@ class TestMakeFlash:
         assert dev_false.get('is_katapult', True) is False
 
 
+    def test_batch_build_skips_devices_excluded_from_build(self):
+        """Batch builds should skip devices excluded from Build All."""
+        from backend.main import get_batch_builds_needed
+
+        devices = [
+            {"profile": "mainboard", "exclude_from_build": False},
+            {"profile": "toolhead", "exclude_from_build": True},
+        ]
+
+        builds = get_batch_builds_needed(devices)
+
+        assert ("mainboard", None) in builds
+        assert ("toolhead", None) not in builds
+
+    def test_flash_exclusion_does_not_exclude_build(self):
+        """Flash and build exclusions should remain independent."""
+        from backend.main import get_batch_builds_needed
+
+        devices = [
+            {
+                "profile": "toolhead",
+                "exclude_from_batch": True,
+                "exclude_from_build": False,
+            },
+        ]
+
+        assert ("toolhead", None) in get_batch_builds_needed(devices)
+
+    def test_batch_flash_filter_uses_build_exclusion(self):
+        """Batch flash excludes build-excluded and flash-excluded devices alike."""
+        from backend.main import is_excluded_from_batch
+
+        devices = [
+            {"name": "BuildExcluded", "exclude_from_batch": False, "exclude_from_build": True},
+            {"name": "FlashExcluded", "exclude_from_batch": True, "exclude_from_build": False},
+            {"name": "Active", "exclude_from_batch": False, "exclude_from_build": False},
+        ]
+
+        excluded = [d["name"] for d in devices if is_excluded_from_batch(d)]
+        active = [d["name"] for d in devices if not is_excluded_from_batch(d)]
+
+        assert excluded == ["BuildExcluded", "FlashExcluded"]
+        assert active == ["Active"]
+
+    def test_excluded_batch_builds_appear_when_not_needed(self):
+        """Excluded-only build targets should be available for the summary."""
+        from backend.main import (
+            get_batch_builds_needed,
+            get_excluded_batch_builds,
+        )
+
+        devices = [
+            {"profile": "mainboard", "exclude_from_build": False},
+            {"profile": "toolhead", "exclude_from_build": True},
+        ]
+        builds = get_batch_builds_needed(devices)
+
+        assert ("toolhead", None) in get_excluded_batch_builds(devices, builds)
+
+    def test_shared_active_build_is_not_reported_excluded(self):
+        """A shared target should build if any device still requires it."""
+        from backend.main import (
+            get_batch_builds_needed,
+            get_excluded_batch_builds,
+        )
+
+        devices = [
+            {"profile": "shared", "exclude_from_build": True},
+            {"profile": "shared", "exclude_from_build": False},
+        ]
+        builds = get_batch_builds_needed(devices)
+
+        assert ("shared", None) not in get_excluded_batch_builds(devices, builds)
+
+    def test_save_device_persists_build_exclusion(self, tmp_path):
+        """FleetManager should persist the Build All exclusion flag."""
+        from backend.fleet_manager import FleetManager
+
+        mgr = FleetManager(str(tmp_path))
+        asyncio.run(
+            mgr.save_device(
+                {
+                    "name": "Toolhead",
+                    "id": "abc123",
+                    "profile": "toolhead",
+                    "method": "can",
+                    "exclude_from_batch": True,
+                    "exclude_from_build": True,
+                }
+            )
+        )
+
+        fleet = asyncio.run(mgr.get_fleet())
+
+        assert fleet[0]["exclude_from_build"] is True
+        assert fleet[0]["exclude_from_batch"] is True
+
 # ---------------------------------------------------------------------------
 # Flash protocol (how) vs readiness (whether) — issue #25
 # ---------------------------------------------------------------------------
@@ -999,7 +1096,7 @@ class TestAvrProfileAutoDetection:
 
 
 class TestMainsailShimHeal:
-    """_ensure_mainsail_shim redeploys /klipperfleet.html after Mainsail wipes it.
+    """_ensure_mainsail_shim redeploys /printer-klipperfleet.html after Mainsail wipes it.
 
     Mainsail clears its own web root on every self-update, deleting the shim,
     while the navi.json entry pointing at it survives -> the sidebar link
@@ -1026,7 +1123,7 @@ class TestMainsailShimHeal:
         self._redirect_home(tmp_path, monkeypatch)
         from backend.main import _ensure_mainsail_shim
         await _ensure_mainsail_shim()
-        assert not (tmp_path / "mainsail" / "klipperfleet.html").exists()
+        assert not (tmp_path / "mainsail" / "printer-klipperfleet.html").exists()
 
     @pytest.mark.asyncio
     async def test_deploys_missing_shim(self, tmp_path, monkeypatch):
@@ -1035,7 +1132,7 @@ class TestMainsailShimHeal:
         self._redirect_home(tmp_path, monkeypatch)
         from backend.main import _ensure_mainsail_shim
         await _ensure_mainsail_shim()
-        dst = tmp_path / "mainsail" / "klipperfleet.html"
+        dst = tmp_path / "mainsail" / "printer-klipperfleet.html"
         assert dst.exists()
         assert dst.read_text() == self._shim_src()
 
@@ -1043,7 +1140,7 @@ class TestMainsailShimHeal:
     async def test_overwrites_stale_shim(self, tmp_path, monkeypatch):
         """A stale/corrupted shim is replaced with the current source."""
         (tmp_path / "mainsail").mkdir()
-        dst = tmp_path / "mainsail" / "klipperfleet.html"
+        dst = tmp_path / "mainsail" / "printer-klipperfleet.html"
         dst.write_text("<html>old broken shim</html>")
         self._redirect_home(tmp_path, monkeypatch)
         from backend.main import _ensure_mainsail_shim
@@ -1054,7 +1151,7 @@ class TestMainsailShimHeal:
     async def test_idempotent_when_current(self, tmp_path, monkeypatch):
         """An already-correct shim is left untouched (no needless rewrite)."""
         (tmp_path / "mainsail").mkdir()
-        dst = tmp_path / "mainsail" / "klipperfleet.html"
+        dst = tmp_path / "mainsail" / "printer-klipperfleet.html"
         dst.write_text(self._shim_src())
         mtime_before = dst.stat().st_mtime_ns
         self._redirect_home(tmp_path, monkeypatch)
@@ -1062,3 +1159,62 @@ class TestMainsailShimHeal:
         await _ensure_mainsail_shim()
         assert dst.stat().st_mtime_ns == mtime_before
         assert dst.read_text() == self._shim_src()
+
+
+class TestNaviEntryHeal:
+    """_ensure_navi_entry migrates navi.json to the current shim href.
+
+    navi.json is only written by install.sh, so users updating through
+    Moonraker's update manager keep the old /klipperfleet.html href, which
+    Mainsail's PWA service worker swallows over HTTPS (issue #39).
+    """
+
+    def _redirect_home(self, tmp_path, monkeypatch):
+        import backend.main as main
+        monkeypatch.setattr(
+            main.os.path, "expanduser",
+            lambda p: p.replace("~", str(tmp_path), 1) if p.startswith("~") else p,
+        )
+
+    def _navi_path(self, tmp_path):
+        return tmp_path / "printer_data" / "config" / ".theme" / "navi.json"
+
+    @pytest.mark.asyncio
+    async def test_migrates_old_href(self, tmp_path, monkeypatch):
+        """An old /klipperfleet.html entry is replaced with /printer-klipperfleet.html."""
+        (tmp_path / "mainsail").mkdir()
+        navi = self._navi_path(tmp_path)
+        navi.parent.mkdir(parents=True)
+        navi.write_text(json.dumps([{
+            "title": "KlipperFleet", "href": "/klipperfleet.html",
+            "target": "_self", "icon": "M0,0", "position": 86,
+        }]))
+        self._redirect_home(tmp_path, monkeypatch)
+        from backend.main import _ensure_navi_entry
+        await _ensure_navi_entry()
+        entries = json.loads(navi.read_text())
+        hrefs = [e["href"] for e in entries if e.get("title") == "KlipperFleet"]
+        assert hrefs == ["/printer-klipperfleet.html"]
+
+    @pytest.mark.asyncio
+    async def test_untouched_when_current(self, tmp_path, monkeypatch):
+        """A current entry is left alone (no rewrite on every boot)."""
+        (tmp_path / "mainsail").mkdir()
+        navi = self._navi_path(tmp_path)
+        navi.parent.mkdir(parents=True)
+        navi.write_text(json.dumps([{
+            "title": "KlipperFleet", "href": "/printer-klipperfleet.html",
+        }]))
+        mtime_before = navi.stat().st_mtime_ns
+        self._redirect_home(tmp_path, monkeypatch)
+        from backend.main import _ensure_navi_entry
+        await _ensure_navi_entry()
+        assert navi.stat().st_mtime_ns == mtime_before
+
+    @pytest.mark.asyncio
+    async def test_no_mainsail_root_is_noop(self, tmp_path, monkeypatch):
+        """No ~/mainsail dir -> navi.json not created."""
+        self._redirect_home(tmp_path, monkeypatch)
+        from backend.main import _ensure_navi_entry
+        await _ensure_navi_entry()
+        assert not self._navi_path(tmp_path).exists()
