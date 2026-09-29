@@ -1160,6 +1160,24 @@ class TestMainsailShimHeal:
         assert dst.stat().st_mtime_ns == mtime_before
         assert dst.read_text() == self._shim_src()
 
+    @pytest.mark.asyncio
+    async def test_removes_legacy_shim(self, tmp_path, monkeypatch):
+        """The pre-#39 klipperfleet.html is cleared out.
+
+        Moonraker updates never run install.sh, so this heal is the only thing
+        that removes it on an upgraded install.
+        """
+        (tmp_path / "mainsail").mkdir()
+        legacy = tmp_path / "mainsail" / "klipperfleet.html"
+        legacy.write_text("<html>pre-#39 shim</html>")
+        self._redirect_home(tmp_path, monkeypatch)
+        from backend.main import _ensure_mainsail_shim
+        await _ensure_mainsail_shim()
+        assert not legacy.exists()
+        assert (
+            tmp_path / "mainsail" / "printer-klipperfleet.html"
+        ).read_text() == self._shim_src()
+
 
 class TestNaviEntryHeal:
     """_ensure_navi_entry migrates navi.json to the current shim href.

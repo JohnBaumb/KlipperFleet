@@ -198,6 +198,13 @@ async def _ensure_mainsail_shim() -> None:
                 f.write(want)
             os.chmod(dst, 0o644)
             logger.info('Redeployed KlipperFleet redirect shim into Mainsail web root.')
+        # Updates applied through Moonraker never run install.sh, so clearing the
+        # pre-#39 shim there is not enough: without this, every install upgraded
+        # from the sidebar keeps an orphan navi.json no longer points at.
+        legacy = os.path.join(mainsail_root, 'klipperfleet.html')
+        if os.path.isfile(legacy):
+            os.unlink(legacy)
+            logger.info('Removed the pre-#39 KlipperFleet redirect shim.')
     except Exception:
         logger.debug('Mainsail shim heal skipped (non-fatal)', exc_info=True)
 
