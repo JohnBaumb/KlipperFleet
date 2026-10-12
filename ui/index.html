@@ -78,7 +78,7 @@
                 </div>
                 <div class="flex items-center text-[10px] text-gray-500">
                     <a href="https://github.com/JohnBaumb/KlipperFleet" target="_blank" rel="noopener noreferrer" class="hover:text-white transition-colors" title="KlipperFleet on GitHub">
-                        <i class="fa-brands fa-github mr-1"></i>v1.5.0-alpha
+                        <i class="fa-brands fa-github mr-1"></i>v1.6.0-alpha
                     </a>
                     <span v-if="currentBranch && currentBranch !== 'main'" class="ml-1 text-yellow-500">({{ currentBranch }})</span>
                     <span v-if="currentCommit" class="ml-auto text-gray-600">{{ currentCommit }}</span>
@@ -121,6 +121,10 @@
                     <button @click="runBatch('build-flash-all')" :disabled="building || flashing || printing" title="Build, then reboot every reachable device into its bootloader and flash all of them." class="bg-red-700 hover:bg-red-800 text-white px-2 md:px-3 py-1 rounded text-[9px] md:text-[10px] font-bold disabled:opacity-50 uppercase whitespace-nowrap flex-none">
                         Build & Flash All
                     </button>
+                    <select v-model="keepMoonraker" :disabled="building || flashing" title="What happens to Moonraker while flashing. Keep it running if Moonraker controls a power device (e.g. a GPIO relay for the MCU PSU) that would switch off on restart. Klipper is always stopped and restarted." class="bg-gray-700 text-white px-1 py-1 rounded text-[9px] md:text-[10px] font-bold uppercase flex-none disabled:opacity-50">
+                        <option :value="false">Restart Moonraker</option>
+                        <option :value="true">Keep Moonraker</option>
+                    </select>
                 </div>
             </header>
 
@@ -995,6 +999,8 @@
                 const printerUrl = ref('');
                 const printerTitle = ref('Printer');
                 const hasReferrer = ref(false);
+                const keepMoonraker = ref(localStorage.getItem('kf_keep_moonraker') === 'true');
+                watch(keepMoonraker, (v) => localStorage.setItem('kf_keep_moonraker', v));
                 const showRawSymbolNames = ref(localStorage.getItem('kf_show_raw_symbols') === 'true');
                 const showOptionalFeatures = ref(localStorage.getItem('kf_show_optional') === 'true');
                 const isKlipperKconfiglib = ref(true);
@@ -1501,7 +1507,7 @@
                     buildLogs.value += `>>> Starting batch operation: ${action}...\n`;
                     
                     try {
-                        const res = await fetch(`batch/${action}`, { method: 'POST' });
+                        const res = await fetch(`batch/${action}?keep_moonraker=${keepMoonraker.value}`, { method: 'POST' });
                         if (!res.ok) {
                             const detail = await res.json().catch(() => ({}));
                             throw new Error(detail.detail || `Batch request failed (${res.status})`);
@@ -1604,7 +1610,8 @@
                                 device_id: deviceId, 
                                 method, 
                                 dfu_id: dfuId,
-                                use_magic_baud: useMagicBaud
+                                use_magic_baud: useMagicBaud,
+                                keep_moonraker: keepMoonraker.value
                             })
                         });
                         if (!response.ok) {
@@ -2284,7 +2291,7 @@
 
                 return { 
                     view, sidebarOpen, configTree, profiles, fleet, selectedProfile, loading, refreshing, building, flashing, updating, querying, printing, printState, printFilename,
-                    buildLogs, formattedLogs, expandLogs, expandLogsHeight, copyLogs, logsCopied, updateValue, saveProfile, saveProfileAs, newProfile, deleteProfile, renameProfile, loadProfile, createMissingProfile, startBuild, runBatch, selfUpdate,
+                    buildLogs, formattedLogs, expandLogs, expandLogsHeight, copyLogs, logsCopied, updateValue, saveProfile, saveProfileAs, newProfile, deleteProfile, renameProfile, loadProfile, createMissingProfile, startBuild, runBatch, keepMoonraker, selfUpdate,
                     devices, selectedDevice, discoverDevices, startFlash, quickFlash, quickBuild, quickFlashOnly, flashBeacon, beaconUpToDate, buildAndDownload, rebootDevice, statusColor, formatStatus,
                     addDeviceToFleet, attachToFleet, updateFleetDevice, onExcludeFromBuildChange, onDeviceProfileChange, removeDeviceFromFleet, error, modifiedValues, formatNotes,
                     printerUrl, printerTitle, hasReferrer, profileInfo, isProfileCanBridge, isProfileLinux,

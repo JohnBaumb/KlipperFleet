@@ -469,3 +469,36 @@ class TestSudoersScope:
         # `fuser *` allowed killing any process on the box as root.
         assert '("fuser", "*")' not in src
         assert '("fuser", "-k /usr/local/bin/klipper_mcu")' in src
+
+
+# --- Keep Moonraker running during flash (issue #43) ----------------------
+
+
+class TestKeepMoonraker:
+    """Restarting Moonraker can switch off a power device it controls."""
+
+    async def _stopped(self, keep):
+        listing = MagicMock()
+        listing.communicate = AsyncMock(
+            return_value=(
+                b'klipper.service\nmoonraker.service\nklipperfleet.service\n',
+                b'',
+            )
+        )
+        proc = MagicMock()
+        proc.wait = AsyncMock()
+        with patch.object(
+            main_mod.asyncio, 'create_subprocess_shell', AsyncMock(return_value=listing)
+        ), patch.object(
+            main_mod.asyncio, 'create_subprocess_exec', AsyncMock(return_value=proc)
+        ) as ex:
+            await main_mod.manage_klipper_services('stop', keep)
+        return [c.args[-1] for c in ex.call_args_list]
+
+    @pytest.mark.asyncio
+    async def test_default_stops_moonraker(self):
+        assert await self._stopped(False) == ['moonraker.service', 'klipper.service']
+
+    @pytest.mark.asyncio
+    async def test_keep_moonraker_leaves_it_running(self):
+        assert await self._stopped(True) == ['klipper.service']
