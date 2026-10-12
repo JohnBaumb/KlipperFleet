@@ -772,6 +772,7 @@ class FlashRequest(BaseModel):
     baudrate: Optional[int] = 250000  # Serial baudrate for Katapult
     use_magic_baud: Optional[bool] = False
     use_dfu_exit: Optional[bool] = True
+    keep_moonraker: bool = False
 
 
 class AttachRequest(BaseModel):
@@ -1159,8 +1160,14 @@ async def build_profile(
     )
 
 
-async def manage_klipper_services(action: str) -> str:
-    """Stops or starts all Klipper-related services."""
+async def manage_klipper_services(
+    action: str, keep_moonraker: bool = False
+) -> str:
+    """Stops or starts all Klipper-related services.
+
+    keep_moonraker leaves Moonraker running: restarting it can drop power
+    devices it controls (issue #43).
+    """
     try:
         cmd_list_str: str = "systemctl list-units --type=service --all --no-legend 'klipper*' 'moonraker*' | awk '{print $1}'"
         process: Process = await asyncio.create_subprocess_shell(
@@ -1175,6 +1182,7 @@ async def manage_klipper_services(action: str) -> str:
             s
             for s in services
             if s and s != 'klipperfleet.service' and s.endswith('.service')
+            and not (keep_moonraker and s.startswith('moonraker'))
         ]
 
         if not target_services:
@@ -1323,7 +1331,7 @@ BATCH_ACTIONS = (
 
 @app.post('/batch/{action}')
 async def batch_operation(
-    action: str, background_tasks: BackgroundTasks
+    action: str, background_tasks: BackgroundTasks, keep_moonraker: bool = False
 ) -> Dict[str, str]:
     """Performs batch operations (build, flash-ready, flash-all, etc.)"""
     if action not in BATCH_ACTIONS:
@@ -1600,7 +1608,7 @@ async def batch_operation(
 
                 # Stop services early to clear the bus for flashing
                 task_store.add_log(
-                    task_id, await manage_klipper_services('stop')
+                    task_id, await manage_klipper_services('stop', keep_moonraker)
                 )
                 services_stopped = True
 
@@ -2271,7 +2279,7 @@ async def batch_operation(
             if services_stopped:
                 task_store.add_log(task_id, '>>> Returning to service...\n')
                 task_store.add_log(
-                    task_id, await manage_klipper_services('start')
+                    task_id, await manage_klipper_services('start', keep_moonraker)
                 )
             task_store.complete_task(task_id)
             _release_hardware()
@@ -2619,7 +2627,7 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                     yield 'Ensure beacon_klipper is configured in moonraker.conf [update_manager].\n'
                     return
 
-                yield await manage_klipper_services('stop')
+                yield await manage_klipper_services('stop', req.keep_moonraker)
                 services_stopped = True
 
                 task_store.update_device_status(
@@ -2643,7 +2651,7 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                 )
             finally:
                 if services_stopped:
-                    yield await manage_klipper_services('start')
+                    yield await manage_klipper_services('start', req.keep_moonraker)
                 task_store.complete_task(task_id)
                 _release_hardware()
 
@@ -2675,7 +2683,7 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
                 return
 
             # Stop services early to clear the bus
-            yield await manage_klipper_services('stop')
+            yield await manage_klipper_services('stop', req.keep_moonraker)
             services_stopped = True
 
             # Query the fleet to determine the interface, baudrate, bridge and katapult settings for this device
@@ -3030,7 +3038,7 @@ async def flash_device(req: FlashRequest) -> StreamingResponse:
             yield f'!!! Error during flash: {str(e)}\n'
         finally:
             if services_stopped:
-                yield await manage_klipper_services('start')
+                yield await manage_klipper_services('start', req.keep_moonraker)
             task_store.complete_task(task_id)
             _release_hardware()
 
