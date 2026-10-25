@@ -889,6 +889,8 @@ async def get_health() -> Dict[str, Any]:
     # 4. Udev rules
     if not os.path.isfile('/etc/udev/rules.d/99-stm32-dfu.rules'):
         issues.append('DFU udev rules missing')
+    if not os.path.isfile('/etc/udev/rules.d/99-rp2040-boot.rules'):
+        issues.append('RP2040 udev rules missing (re-run install.sh)')
 
     # 5. Moonraker config
     conf_path = os.path.expanduser('~/printer_data/config/moonraker.conf')

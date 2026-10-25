@@ -71,6 +71,11 @@ else
     echo "KlipperFleet: No sudoers file found (skipped)."
 fi
 
+# 5b. Remove udev Rules
+echo "KlipperFleet: Removing udev rules..."
+rm -f /etc/udev/rules.d/99-stm32-dfu.rules /etc/udev/rules.d/99-rp2040-boot.rules
+udevadm control --reload-rules || true
+
 # 6. Remove Moonraker Integration
 echo "KlipperFleet: Removing Moonraker integration..."
 MOONRAKER_CONF="${MOONRAKER_CONFIG_DIR}/moonraker.conf"

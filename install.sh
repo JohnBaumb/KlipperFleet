@@ -88,6 +88,10 @@ apt-get update && apt-get install -y $DEPS
 # Setup udev rules for DFU devices
 log_info "Setting up udev rules for DFU devices..."
 echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="df11", MODE="0666"' | sudo tee /etc/udev/rules.d/99-stm32-dfu.rules
+# RP2040 BOOTSEL. Without it Klipper's flash_usb.py retries rp2040_flash under
+# sudo, which fails non-interactively (and must not be whitelisted: the binary
+# is user-owned, so a sudoers rule for it is a root escalation).
+echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="0003", MODE="0666"' | sudo tee /etc/udev/rules.d/99-rp2040-boot.rules
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 
