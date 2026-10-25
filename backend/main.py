@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, AsyncGenerator, Tuple, Set
@@ -70,6 +70,25 @@ async def lifespan(application: FastAPI):
 app = FastAPI(
     title='KlipperFleet API', version='1.6.0-alpha', lifespan=lifespan
 )
+
+
+@app.middleware('http')
+async def require_csrf_header(request: Request, call_next):
+    """Reject writes that do not carry the X-KlipperFleet header.
+
+    POST-only was not enough: any page the user has open can send a no-cors
+    POST with a query string or a raw body (backup import wrote fleet.json,
+    whose custom_make_command then ran through bash -c). A custom header
+    forces a CORS preflight, and with no CORS middleware that preflight fails,
+    so only same-origin pages (the UI, behind any proxy) can set it.
+    """
+    if request.method not in ('GET', 'HEAD', 'OPTIONS') and (
+        request.headers.get('x-klipperfleet') != '1'
+    ):
+        return JSONResponse(
+            status_code=403, content={'detail': 'Missing X-KlipperFleet header'}
+        )
+    return await call_next(request)
 
 # Configuration
 KLIPPER_DIR: str = os.path.abspath(

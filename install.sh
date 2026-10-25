@@ -106,6 +106,11 @@ KF_VENV="${SRCDIR}/venv"
 if [ ! -d "$KF_VENV" ]; then
     sudo -u $USER python3 -m venv "$KF_VENV"
 fi
+# The starlette/python-multipart security fixes need Python 3.10+; 3.9 still
+# installs, it just stays on the last versions that support it.
+if ! "$KF_VENV/bin/python" -c 'import sys; sys.exit(sys.version_info < (3, 10))'; then
+    log_warn "Python 3.9 cannot receive current security fixes for KlipperFleet's web stack. Consider upgrading your OS (Debian Bookworm or newer)."
+fi
 
 # Install Python dependencies
 log_info "Installing Python dependencies from requirements.txt..."

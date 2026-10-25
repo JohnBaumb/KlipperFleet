@@ -502,3 +502,44 @@ class TestKeepMoonraker:
     @pytest.mark.asyncio
     async def test_keep_moonraker_leaves_it_running(self):
         assert await self._stopped(True) == ['klipper.service']
+
+
+# --- Cross-site writes need the X-KlipperFleet header ---------------------
+
+
+class TestCsrfHeader:
+    """A no-cors POST from another page cannot set a custom header."""
+
+    def _request(self, method, url, **kw):
+        import httpx
+
+        async def go():
+            transport = httpx.ASGITransport(app=main_mod.app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url='http://kf'
+            ) as c:
+                return await c.request(method, url, **kw)
+
+        return asyncio.get_event_loop().run_until_complete(go())
+
+    def test_write_without_header_is_rejected(self):
+        with patch.object(
+            main_mod, 'manage_klipper_services', AsyncMock(return_value='ok')
+        ) as manage:
+            r = self._request('POST', '/services/manage?action=restart')
+            assert r.status_code == 403
+            manage.assert_not_called()
+
+            r = self._request(
+                'POST',
+                '/services/manage?action=restart',
+                headers={'X-KlipperFleet': '1'},
+            )
+            assert r.status_code == 200
+            manage.assert_called_once()
+
+    def test_reads_need_no_header(self):
+        with patch.object(
+            main_mod, 'get_services_status', AsyncMock(return_value={})
+        ):
+            assert self._request('GET', '/services/status').status_code == 200
