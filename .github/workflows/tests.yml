@@ -8,30 +8,29 @@ on:
 
 jobs:
   test:
-    # Pinned: ubuntu-latest (26.04) has no Python 3.9 build for setup-python.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
       matrix:
-        # 3.9 is the floor advertised in the README; 3.13 catches the modern
-        # asyncio behaviour (closed event loops) that 3.9 silently tolerates.
-        python-version: ['3.9', '3.13']
+        # Same range Kalico's CI tests. uv supplies the interpreters, so the
+        # 3.9 floor doesn't depend on what the runner image ships.
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13', '3.14']
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python-version }}
+          activate-environment: true
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r backend/requirements.txt
-          pip install pytest pytest-asyncio httpx kconfiglib
+          uv pip install -r backend/requirements.txt
+          uv pip install pytest pytest-asyncio httpx kconfiglib
 
       - name: Run tests
         run: pytest tests/ -v --tb=short
