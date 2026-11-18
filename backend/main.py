@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, AsyncGenerator, Tuple, Set
@@ -70,6 +70,25 @@ async def lifespan(application: FastAPI):
 app = FastAPI(
     title='KlipperFleet API', version='1.6.0-alpha', lifespan=lifespan
 )
+
+
+@app.middleware('http')
+async def require_csrf_header(request: Request, call_next):
+    """Reject writes that do not carry the X-KlipperFleet header.
+
+    POST-only was not enough: any page the user has open can send a no-cors
+    POST with a query string or a raw body (backup import wrote fleet.json,
+    whose custom_make_command then ran through bash -c). A custom header
+    forces a CORS preflight, and with no CORS middleware that preflight fails,
+    so only same-origin pages (the UI, behind any proxy) can set it.
+    """
+    if request.method not in ('GET', 'HEAD', 'OPTIONS') and (
+        request.headers.get('x-klipperfleet') != '1'
+    ):
+        return JSONResponse(
+            status_code=403, content={'detail': 'Missing X-KlipperFleet header'}
+        )
+    return await call_next(request)
 
 # Configuration
 KLIPPER_DIR: str = os.path.abspath(
@@ -818,6 +837,13 @@ async def get_status() -> Dict[str, Any]:
     }
 
 
+def requirement_name(spec: str) -> str:
+    """'starlette>=1.3.1; python_version >= "3.10"' -> 'starlette', normalized
+    the way pip compares names. Presence only: version floors are pip's job."""
+    name = re.split(r'[\s<>=!~;\[@]', spec.strip(), maxsplit=1)[0]
+    return re.sub(r'[-_.]+', '-', name).lower()
+
+
 @app.get('/api/health')
 async def get_health() -> Dict[str, Any]:
     """Checks install health: system packages, venv, sudoers, udev, moonraker config."""
@@ -859,7 +885,7 @@ async def get_health() -> Dict[str, Any]:
             try:
                 with open(req_file, 'r') as f:
                     required = {
-                        line.strip().lower()
+                        requirement_name(line)
                         for line in f
                         if line.strip() and not line.startswith('#')
                     }
@@ -875,7 +901,7 @@ async def get_health() -> Dict[str, Any]:
                 for line in stdout.decode().splitlines()[2:]:
                     parts = line.split()
                     if parts:
-                        installed.add(parts[0].lower())
+                        installed.add(requirement_name(parts[0]))
                 for pkg in required:
                     if pkg not in installed:
                         issues.append(f'Missing pip package: {pkg}')
@@ -889,6 +915,8 @@ async def get_health() -> Dict[str, Any]:
     # 4. Udev rules
     if not os.path.isfile('/etc/udev/rules.d/99-stm32-dfu.rules'):
         issues.append('DFU udev rules missing')
+    if not os.path.isfile('/etc/udev/rules.d/99-rp2040-boot.rules'):
+        issues.append('RP2040 udev rules missing (re-run install.sh)')
 
     # 5. Moonraker config
     conf_path = os.path.expanduser('~/printer_data/config/moonraker.conf')

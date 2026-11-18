@@ -9,6 +9,21 @@
          Loading it only from the CDN meant a printer with no internet served a
          blank page. document.write is deliberate: the fallback has to run
          synchronously, before the app script below. -->
+    <!-- Every write needs X-KlipperFleet (see require_csrf_header in main.py). -->
+    <script>
+        (function () {
+            const origFetch = window.fetch;
+            window.fetch = function (input, init) {
+                init = init || {};
+                const method = (init.method || 'GET').toUpperCase();
+                if (method !== 'GET' && method !== 'HEAD') {
+                    init.headers = new Headers(init.headers || {});
+                    init.headers.set('X-KlipperFleet', '1');
+                }
+                return origFetch.call(this, input, init);
+            };
+        })();
+    </script>
     <script src="vendor/vue/vue.global.js"></script>
     <script>window.Vue || document.write('<scr' + 'ipt src="https://unpkg.com/vue@3/dist/vue.global.js"><\/scr' + 'ipt>');</script>
     <link rel="stylesheet" href="tailwind.built.css">
