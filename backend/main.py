@@ -837,6 +837,13 @@ async def get_status() -> Dict[str, Any]:
     }
 
 
+def requirement_name(spec: str) -> str:
+    """'starlette>=1.3.1; python_version >= "3.10"' -> 'starlette', normalized
+    the way pip compares names. Presence only: version floors are pip's job."""
+    name = re.split(r'[\s<>=!~;\[@]', spec.strip(), maxsplit=1)[0]
+    return re.sub(r'[-_.]+', '-', name).lower()
+
+
 @app.get('/api/health')
 async def get_health() -> Dict[str, Any]:
     """Checks install health: system packages, venv, sudoers, udev, moonraker config."""
@@ -878,7 +885,7 @@ async def get_health() -> Dict[str, Any]:
             try:
                 with open(req_file, 'r') as f:
                     required = {
-                        line.strip().lower()
+                        requirement_name(line)
                         for line in f
                         if line.strip() and not line.startswith('#')
                     }
@@ -894,7 +901,7 @@ async def get_health() -> Dict[str, Any]:
                 for line in stdout.decode().splitlines()[2:]:
                     parts = line.split()
                     if parts:
-                        installed.add(parts[0].lower())
+                        installed.add(requirement_name(parts[0]))
                 for pkg in required:
                     if pkg not in installed:
                         issues.append(f'Missing pip package: {pkg}')

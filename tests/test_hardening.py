@@ -543,3 +543,14 @@ class TestCsrfHeader:
             main_mod, 'get_services_status', AsyncMock(return_value={})
         ):
             assert self._request('GET', '/services/status').status_code == 200
+
+
+# --- Health check reads names out of version-floored requirements ---------
+
+
+def test_requirement_names_match_pip_list():
+    """Floors in requirements.txt made /api/health report installed packages missing."""
+    with open(os.path.join(os.path.dirname(__file__), '..', 'backend', 'requirements.txt')) as f:
+        names = {main_mod.requirement_name(l) for l in f if l.strip() and not l.startswith('#')}
+    assert names == {'fastapi', 'starlette', 'uvicorn', 'python-multipart', 'httpx', 'certifi', 'pyserial'}
+    assert main_mod.requirement_name('Python_Multipart') == 'python-multipart'
