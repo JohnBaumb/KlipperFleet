@@ -2384,6 +2384,8 @@ async def get_fleet(fast: bool = False) -> List[Dict[str, Any]]:
                     dev['dfu_status'] = 'querying'
         return fleet
 
+    # A full scan covers every interface. Reuse it for all CAN nodes in this response.
+    can_devices: Optional[List[Dict[str, str]]] = None
     for dev in fleet:
         # If we have a real-time override from an active task, use it
         if dev['id'] in status_overrides:
@@ -2391,6 +2393,14 @@ async def get_fleet(fast: bool = False) -> List[Dict[str, Any]]:
         elif dev['method'] == 'can' and can_locked and is_bus_task_running:
             dev['status'] = 'bus_busy'
         else:
+            if (
+                dev['method'] == 'can'
+                and not dev.get('is_bridge')
+                and can_devices is None
+            ):
+                can_devices = await flash_mgr.discover_can_devices(
+                    skip_moonraker=is_bus_task_running
+                )
             # Skip moonraker if a bus task is running (services likely stopped)
             dev['status'] = await flash_mgr.check_device_status(
                 dev['id'],
@@ -2400,6 +2410,7 @@ async def get_fleet(fast: bool = False) -> List[Dict[str, Any]]:
                 is_bridge=dev.get('is_bridge', False),
                 interface=dev.get('interface', 'can0'),
                 serial_id=dev.get('serial_id'),
+                can_devices=can_devices,
             )
 
         if dev.get('serial_id'):
