@@ -613,6 +613,13 @@ class FlashManager:
             return list(self._can_cache.get(interface, []))
 
         async with self._can_lock:
+            # Another request may have refreshed the cache while we waited.
+            if (
+                not force
+                and asyncio.get_running_loop().time()
+                - self._can_cache_time.get(interface, 0.0) < self._can_cache_ttl_s
+            ):
+                return list(self._can_cache.get(interface, []))
             logger.debug('CAN Lock Acquired for discovery')
             seen_uuids = {}  # uuid -> device_dict
 
@@ -1058,6 +1065,7 @@ class FlashManager:
         is_bridge: bool = False,
         interface: str = 'can0',
         serial_id: Optional[str] = None,
+        can_devices: Optional[List[Dict[str, str]]] = None,
     ) -> str:
         """Checks if a device is reachable and its current mode."""
         method = method.lower()
@@ -1148,10 +1156,11 @@ class FlashManager:
 
             return 'offline'
         elif method == 'can':
-            devs: List[Dict[str, str]] = await self.discover_can_devices(
-                skip_moonraker=skip_moonraker
-            )
-            for d in devs:
+            if can_devices is None:
+                can_devices = await self.discover_can_devices(
+                    skip_moonraker=skip_moonraker
+                )
+            for d in can_devices:
                 if d['id'] == device_id:
                     return d.get('mode', 'offline')
 

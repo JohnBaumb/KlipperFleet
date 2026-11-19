@@ -7,6 +7,27 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 from backend.flash_manager import FlashManager
 
+
+def test_fleet_refresh_reuses_can_scan(monkeypatch):
+    from backend import main
+
+    devices = [
+        {'id': 'node1', 'method': 'can', 'interface': 'can0'},
+        {'id': 'node2', 'method': 'can', 'interface': 'can1'},
+        {'id': 'missing', 'method': 'can', 'interface': 'can1'},
+    ]
+    monkeypatch.setattr(main.fleet_mgr, 'get_fleet', AsyncMock(return_value=devices))
+    discover = AsyncMock(return_value=[
+        {'id': 'node1', 'mode': 'service'},
+        {'id': 'node2', 'mode': 'ready'},
+    ])
+    monkeypatch.setattr(main.flash_mgr, 'discover_can_devices', discover)
+
+    fleet = asyncio.run(main.get_fleet())
+
+    assert [device['status'] for device in fleet] == ['service', 'ready', 'offline']
+    discover.assert_awaited_once_with(skip_moonraker=False)
+
 # ---------------------------------------------------------------------------
 # Bug #1: Task ID uniqueness (uuid-based)
 # ---------------------------------------------------------------------------
