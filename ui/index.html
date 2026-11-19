@@ -945,7 +945,9 @@
                 const commitsBehind = ref(0);
                 const currentCommit = ref('');
                 const currentBranch = ref('');
-                const querying = ref(false);
+                const fleetRefreshes = ref(0);
+                const discoveringDevices = ref(false);
+                const querying = computed(() => fleetRefreshes.value > 0 || discoveringDevices.value);
                 const printing = ref(false);
                 const printState = ref('');
                 const printFilename = ref('');
@@ -1175,18 +1177,22 @@
 
                 const fetchFleet = async (fast = true) => {
                     const requestMutationVersion = fleetMutationVersion;
-                    querying.value = true;
+                    fleetRefreshes.value++;
                     try {
                         // Only do the "fast" load if requested and we don't have data or it's a manual refresh
                         if (fast && fleet.value.length === 0) {
                             const fastRes = await fetch('fleet?fast=true', { cache: 'no-store' });
-                            const fastSnapshot = await fastRes.json();
-                            if (!applyFleetSnapshot(fastSnapshot, requestMutationVersion)) return;
+                            if (fastRes.ok) {
+                                const fastSnapshot = await fastRes.json();
+                                if (!applyFleetSnapshot(fastSnapshot, requestMutationVersion)) return;
+                            }
                         }
 
                         // Then, get the full status (this may be slow due to CAN discovery)
                         const res = await fetch('fleet', { cache: 'no-store' });
+                        if (!res.ok) throw new Error(`Fleet request failed (${res.status})`);
                         const snapshot = await res.json();
+                        if (building.value || flashing.value) return;
                         if (!applyFleetSnapshot(snapshot, requestMutationVersion)) return;
 
                         // Fetch version info for devices
@@ -1198,7 +1204,7 @@
                     } catch (e) {
                         console.error("Failed to fetch fleet", e);
                     } finally {
-                        querying.value = false;
+                        fleetRefreshes.value--;
                     }
                 };
 
@@ -1277,11 +1283,32 @@
                 };
 
                 let lastFleetFetch = 0;
+                let fetchingTaskStatuses = false;
                 const fetchFleetThrottled = async () => {
                     const now = Date.now();
-                    if (now - lastFleetFetch < 2000) return; // 2 second throttle
+                    if (fetchingTaskStatuses || now - lastFleetFetch < 2000) return;
                     lastFleetFetch = now;
-                    await fetchFleet(false);
+                    fetchingTaskStatuses = true;
+                    const taskId = currentTaskId.value;
+                    const requestMutationVersion = fleetMutationVersion;
+                    try {
+                        const res = await fetch('fleet?fast=true', { cache: 'no-store' });
+                        if (!res.ok) return;
+                        const snapshot = await res.json();
+                        if (taskId !== currentTaskId.value || requestMutationVersion !== fleetMutationVersion) return;
+                        const updates = new Map(snapshot.map(device => [device.id, device]));
+                        for (const device of fleet.value) {
+                            const update = updates.get(device.id);
+                            if (!update) continue;
+                            for (const key of ['status', 'serial_status', 'dfu_status']) {
+                                if (update[key] && update[key] !== 'querying') device[key] = update[key];
+                            }
+                        }
+                    } catch (e) {
+                        console.error('Failed to fetch task device statuses', e);
+                    } finally {
+                        fetchingTaskStatuses = false;
+                    }
                 };
 
                 const fetchPrintStatus = async () => {
@@ -1333,14 +1360,15 @@
                 };
 
                 const discoverDevices = async () => {
-                    querying.value = true;
+                    if (discoveringDevices.value) return;
+                    discoveringDevices.value = true;
                     try {
                         const res = await fetch('devices/discover');
                         devices.value = await res.json();
                     } catch (e) {
                         console.error("Failed to discover devices", e);
                     } finally {
-                        querying.value = false;
+                        discoveringDevices.value = false;
                     }
                 };
 
@@ -2237,48 +2265,30 @@
                         fetchProfileInfo();
                     });
                     fetchFleet();
-                    fetchServices();
-                    fetchPrintStatus();
                     discoverDevices();
                     fetchSystemStatus();
                     fetchHealth();
                     fetchUpdateCheck();
                     
-                    // Refresh fleet status every 30 seconds (with error backoff)
-                    let fleetErrors = 0;
-                    let fleetInterval = setInterval(() => {
-                        fetchFleet().then(() => { fleetErrors = 0; }).catch(() => {
-                            fleetErrors++;
-                            if (fleetErrors >= 5) {
-                                clearInterval(fleetInterval);
-                                console.warn('Fleet polling stopped after repeated failures');
-                            }
-                        });
+                    // A slow refresh can outlast the interval. Let it finish before polling again.
+                    setInterval(() => {
+                        if (fleetRefreshes.value || building.value || flashing.value) return;
+                        fetchFleet();
                     }, 30000);
 
-                    // Refresh service status every 10 seconds (with error backoff)
-                    let serviceErrors = 0;
-                    let serviceInterval = setInterval(() => {
-                        fetchServices().then(() => { serviceErrors = 0; }).catch(() => {
-                            serviceErrors++;
-                            if (serviceErrors >= 5) {
-                                clearInterval(serviceInterval);
-                                console.warn('Service polling stopped after repeated failures');
-                            }
-                        });
-                    }, 10000);
-
-                    // Refresh print status every 10 seconds (with error backoff)
-                    let printErrors = 0;
-                    let printInterval = setInterval(() => {
-                        fetchPrintStatus().then(() => { printErrors = 0; }).catch(() => {
-                            printErrors++;
-                            if (printErrors >= 5) {
-                                clearInterval(printInterval);
-                                console.warn('Print status polling stopped after repeated failures');
-                            }
-                        });
-                    }, 10000);
+                    // Keep at most one scheduled refresh of service and print status in flight.
+                    let refreshingStatus = false;
+                    const refreshStatus = async () => {
+                        if (refreshingStatus) return;
+                        refreshingStatus = true;
+                        try {
+                            await Promise.all([fetchServices(), fetchPrintStatus()]);
+                        } finally {
+                            refreshingStatus = false;
+                        }
+                    };
+                    refreshStatus();
+                    setInterval(refreshStatus, 10000);
                 });
 
                 // Watch expand settings and persist to localStorage
